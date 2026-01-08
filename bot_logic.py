@@ -21,6 +21,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    print(f"[DEBUG] Nhận tin nhắn từ: {message.author.name} tại kênh {message.channel.name}")
     if message.author.bot and message.author.id != bot.user.id:
         # Logic: Nếu muốn bot tự động đọc ảnh của bot khác (ví dụ Karuta)
         # Bạn có thể thêm điều kiện kiểm tra ID của Karuta ở đây
