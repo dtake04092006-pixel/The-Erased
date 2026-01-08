@@ -1,13 +1,17 @@
 import discord
 import os
+import time
 from discord.ext import commands
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from ocr_engine import scan_image_gemini
 
-# Cấu hình Intent (BẮT BUỘC)
 intents = discord.Intents.default()
 intents.message_content = True 
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+executor = ThreadPoolExecutor(max_workers=3)
+recent_drops = deque(maxlen=5)
 
 KARUTA_ID = 646937666251915264
 
@@ -22,29 +26,30 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # 1. Check đúng Karuta chưa
     if message.author.id != KARUTA_ID:
         return 
 
-    # 2. Check đúng từ khóa "dropping" chưa
+    # Rate limiting
+    now = time.time()
+    recent_drops.append(now)
+    if len(recent_drops) >= 5 and now - recent_drops[0] < 10:
+        print("[WARN] Quá nhiều drops trong 10s, bỏ qua...")
+        return
+
     is_dropping = False
     
-    # Check nội dung tin nhắn thường
     if message.content and "dropping" in message.content.lower():
         is_dropping = True
     
-    # Check trong Embed (Karuta hay để chữ 'I'm dropping' ở description)
     if not is_dropping and message.embeds:
         description = message.embeds[0].description or ""
         title = message.embeds[0].title or ""
         if "dropping" in description.lower() or "dropping" in title.lower():
             is_dropping = True
 
-    # Không có chữ "dropping" thì cút
     if not is_dropping:
         return
 
-    # 3. Lấy ảnh và Quét
     image_url = None
     if message.embeds:
         if message.embeds[0].image:
@@ -58,12 +63,18 @@ async def on_message(message):
         print(f"[DETECT] Phát hiện 'dropping'! Đang quét ảnh...")
         gemini_keys = get_gemini_keys()
         
-        # Chạy OCR
-        ocr_results = await bot.loop.run_in_executor(None, scan_image_gemini, image_url, gemini_keys)
-        
-        if ocr_results:
-            print(f"[OK] Kết quả: {ocr_results}")
-            await send_yoru_style_embed(message.channel, ocr_results)
+        try:
+            ocr_results = await bot.loop.run_in_executor(
+                executor, scan_image_gemini, image_url, gemini_keys
+            )
+            
+            if ocr_results:
+                print(f"[OK] Kết quả: {ocr_results}")
+                await send_yoru_style_embed(message.channel, ocr_results)
+            else:
+                print("[WARN] OCR không trả về kết quả")
+        except Exception as e:
+            print(f"[ERROR] Lỗi xử lý OCR: {e}")
 
     await bot.process_commands(message)
 
@@ -81,8 +92,17 @@ async def send_yoru_style_embed(channel, results):
             embed = discord.Embed(description="\n".join(description_lines), color=0x36393f)
             embed.set_footer(text="Shadow OCR")
             await channel.send(embed=embed)
-        except: pass
+        except Exception as e:
+            print(f"[ERROR] Không gửi được embed: {e}")
+
+@bot.event
+async def on_close():
+    executor.shutdown(wait=True)
+    print("🛑 Bot đã tắt an toàn")
 
 def run_discord_bot():
     token = os.getenv("DISCORD_TOKEN")
-    if token: bot.run(token)
+    if token: 
+        bot.run(token)
+    else:
+        print("❌ Thiếu DISCORD_TOKEN trong .env")
