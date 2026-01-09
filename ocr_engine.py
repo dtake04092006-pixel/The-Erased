@@ -7,33 +7,25 @@ import time
 import os
 from PIL import Image, ImageEnhance
 
-# --- CẤU HÌNH GROQ ---
-# Bạn cần nhập GROQ_API_KEY vào biến môi trường trên Render
-# Nếu có nhiều Key, cách nhau bằng dấu phẩy: key1,key2,key3
-def get_groq_keys(api_keys_raw):
-    # Nếu api_keys_raw là list (do code cũ truyền vào), gộp lại rồi tách ra
-    if isinstance(api_keys_raw, list):
-        # Đây là fix tạm nếu code bot_logic vẫn truyền list
-        return [k for k in api_keys_raw if k.strip()]
-    return [k.strip() for k in api_keys_raw.split(',') if k.strip()]
-
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Chuyển sang dùng GROQ (Llama 3.2 Vision).
-    Tên hàm giữ nguyên là 'scan_image_gemini' để không phải sửa bên bot_logic.py
-    nhưng ruột thì chạy bằng Groq.
+    OCR Engine: Chuyển sang dùng GROQ (Llama 3.2 90B Vision).
     """
-    # Lọc key (Groq Key thường bắt đầu bằng 'gsk_')
-    valid_keys = [k for k in api_keys_list if k.strip()]
+    # Xử lý input key (nếu là string thì split, nếu là list thì giữ nguyên)
+    if isinstance(api_keys_list, str):
+        valid_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
+    else:
+        valid_keys = [k for k in api_keys_list if k.strip()]
+
     if not valid_keys:
-        print("[OCR] ❌ Thiếu GROQ_API_KEY!", flush=True)
+        print("[GROQ] ❌ Thiếu API Key!", flush=True)
         return []
 
     headers_img = {"User-Agent": "Mozilla/5.0"}
     session = requests.Session()
 
     try:
-        # 1. TẢI ẢNH & XỬ LÝ (Giữ nguyên logic Cắt Ngang cũ vì nó tối ưu)
+        # 1. TẢI ẢNH
         img_bytes = None
         for _ in range(2):
             try:
@@ -48,17 +40,17 @@ def scan_image_gemini(image_url, api_keys_list):
         img = Image.open(io.BytesIO(img_bytes))
         width, height = img.size
         
-        # Cắt dải ngang dưới đáy (15%)
+        # Cắt dải ngang (15% đáy)
         print_crop_top = int(height * 0.85) 
         crop_img = img.crop((0, print_crop_top, width, height))
         
         if crop_img.mode != 'RGB': crop_img = crop_img.convert('RGB')
         
-        # Tăng tương phản cho Llama dễ đọc
+        # Tăng tương phản
         enhancer = ImageEnhance.Contrast(crop_img)
         crop_img = enhancer.enhance(1.5)
         
-        # Resize nhỏ lại (Groq giới hạn kích thước ảnh input)
+        # Resize
         if crop_img.width > 800:
             ratio = 800 / float(crop_img.width)
             new_height = int((float(crop_img.height) * float(ratio)))
@@ -72,7 +64,6 @@ def scan_image_gemini(image_url, api_keys_list):
         random.shuffle(valid_keys)
         
         for api_key in valid_keys:
-            # Endpoint chuẩn của Groq
             url = "https://api.groq.com/openai/v1/chat/completions"
             
             headers = {
@@ -81,8 +72,8 @@ def scan_image_gemini(image_url, api_keys_list):
             }
             
             payload = {
-                # Model Vision của Groq (QUAN TRỌNG: Phải dùng đúng tên này)
-                "model": "llama-3.2-11b-vision-preview",
+                # --- ĐỔI TÊN MODEL Ở ĐÂY ---
+                "model": "llama-3.2-90b-vision-preview", 
                 "messages": [
                     {
                         "role": "user",
@@ -92,19 +83,17 @@ def scan_image_gemini(image_url, api_keys_list):
                         ]
                     }
                 ],
-                "temperature": 0.1, # Giảm sáng tạo để đọc số chuẩn hơn
+                "temperature": 0.1,
                 "max_tokens": 100
             }
 
             try:
-                # Gửi request
-                resp = session.post(url, json=payload, headers=headers, timeout=6)
+                resp = session.post(url, json=payload, headers=headers, timeout=8) # 90b to hơn nên timeout dài hơn xíu
                 
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data['choices'][0]['message']['content']
                     
-                    # Regex tìm số
                     matches = re.findall(r'(\d+)[\s\-\.]+(\d+)', content)
                     if matches:
                         results = []
@@ -113,18 +102,17 @@ def scan_image_gemini(image_url, api_keys_list):
                             results.append((i, int(p_str), int(e_str)))
                         return results
                     else:
-                        # Groq trả lời nhưng không tìm thấy số
                         return []
                 
                 elif resp.status_code == 429:
-                    print(f"[GROQ] ⏳ Key ...{api_key[-4:]} bị Rate Limit. Đổi key...", flush=True)
+                    print(f"[GROQ] ⏳ Key ...{api_key[-4:]} Rate Limit. Đổi key...", flush=True)
                     continue
                 else:
+                    # In lỗi ra để debug nếu sai tên model tiếp
                     print(f"[GROQ] ❌ Lỗi {resp.status_code}: {resp.text}", flush=True)
                     continue
 
-            except Exception as e:
-                print(f"[GROQ] 🔌 Lỗi mạng: {e}", flush=True)
+            except Exception:
                 continue
         
         return []
