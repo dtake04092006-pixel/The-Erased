@@ -1,114 +1,120 @@
-import requests
-import io
-import base64
-import re
-import random
-from PIL import Image
+import discord
+import os
+import time
+from discord.ext import commands
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from ocr_engine import scan_image_gemini
 
-def scan_image_gemini(image_url, api_keys):
-    """
-    OCR Engine với Log chi tiết trạng thái API để debug Key.
-    """
-    valid_keys = [k for k in api_keys if k.strip()]
-    if not valid_keys:
-        print("[OCR] ❌ Chưa nhập GEMINI_API_KEY trong Environment Variables!")
-        return []
+# Cấu hình Intent
+intents = discord.Intents.default()
+intents.message_content = True 
 
-    try:
-        # Tải ảnh (Retry 3 lần)
-        img_bytes = None
-        for attempt in range(3):
-            try:
-                resp = requests.get(image_url, timeout=10)
-                if resp.status_code == 200:
-                    img_bytes = resp.content
-                    break
-            except: pass
+bot = commands.Bot(command_prefix="!", intents=intents)
+executor = ThreadPoolExecutor(max_workers=3)
+recent_drops = deque(maxlen=5)
+
+KARUTA_ID = 646937666251915264
+
+def get_gemini_keys():
+    keys = os.getenv("GEMINI_API_KEY", "")
+    return keys.split(",") if keys else []
+
+@bot.event
+async def on_ready():
+    print(f"✅ Bot Online: {bot.user.name}")
+    print(f"✅ Đang chờ Karuta 'dropping'...")
+
+@bot.event
+async def on_message(message):
+    if message.author.id != KARUTA_ID:
+        return 
+
+    # Lấy tên Server để log
+    server_name = message.guild.name if message.guild else "Direct Message"
+    
+    # Rate limiting (Chống spam log)
+    now = time.time()
+    recent_drops.append(now)
+    if len(recent_drops) >= 5 and now - recent_drops[0] < 10:
+        print(f"[{server_name}] [WARN] ⚠️ Quá nhiều drops liên tục, tạm bỏ qua...")
+        return
+
+    # Check từ khóa "dropping"
+    is_dropping = False
+    if message.content and "dropping" in message.content.lower():
+        is_dropping = True
+    if not is_dropping and message.embeds:
+        desc = message.embeds[0].description or ""
+        title = message.embeds[0].title or ""
+        if "dropping" in desc.lower() or "dropping" in title.lower():
+            is_dropping = True
+
+    if not is_dropping:
+        return
+
+    # Lấy ảnh
+    image_url = None
+    if message.embeds:
+        if message.embeds[0].image:
+            image_url = message.embeds[0].image.url
+        elif message.embeds[0].thumbnail:
+            image_url = message.embeds[0].thumbnail.url
+    elif message.attachments:
+        image_url = message.attachments[0].url
+
+    if image_url:
+        print(f"[{server_name}] 🔍 [DETECT] Phát hiện Drop! Đang gửi sang Gemini...")
+        gemini_keys = get_gemini_keys()
         
-        if not img_bytes: 
-            print("[OCR] ❌ Không tải được ảnh từ Discord (URL lỗi hoặc mạng lag).")
-            return []
-
-        img = Image.open(io.BytesIO(img_bytes))
-        width, height = img.size
-        
-        # Logic cắt ảnh
-        num_cards = 3 
-        if width > 1000: num_cards = 4
-        card_width = width // num_cards
-        results = []
-        
-        # Chọn Key ngẫu nhiên
-        api_key = random.choice(valid_keys).strip()
-        # Lấy 4 ký tự cuối của key để log (giúp bạn biết key nào đang chạy mà ko lộ hết key)
-        key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
-        
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-
-        print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
-
-        for i in range(num_cards):
-            left = i * card_width
-            right = (i + 1) * card_width
+        try:
+            # Chạy OCR
+            ocr_results = await bot.loop.run_in_executor(
+                executor, scan_image_gemini, image_url, gemini_keys
+            )
             
-            # Cắt 15% dưới (Tỷ lệ 0.86 như code cũ của bạn)
-            print_crop_top = int(height * 0.86) 
-            crop_img = img.crop((left, print_crop_top, right, height))
-            
-            # Fix lỗi RGBA
-            if crop_img.mode in ("RGBA", "P"):
-                crop_img = crop_img.convert("RGB")
-            
-            # Base64
-            buffered = io.BytesIO()
-            crop_img.save(buffered, format="JPEG")
-            img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": "Identify the Print Number and Edition Number. Output ONLY two numbers separated by a space. Format: 'Print Edition'. Example: '1234 2'. If edition is not visible, assume 1."},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-                    ]
-                }]
-            }
-            
-            # --- LOG QUAN TRỌNG: BÁO CÁO GỬI API ---
-            print(f"[GEMINI] 📤 Thẻ {i+1}: Đang gửi tới Google (Key: ...{key_suffix})...", flush=True)
-            
-            try:
-                ocr_resp = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+            if ocr_results:
+                print(f"[{server_name}] ✅ [SUCCESS] Đọc thành công!")
+                for idx, print_num, edition_num in ocr_results:
+                    print(f"   ➤ Thẻ {idx+1}: Print #{print_num} | Edition {edition_num}")
                 
-                # --- LOG QUAN TRỌNG: TRẠNG THÁI PHẢN HỒI ---
-                if ocr_resp.status_code == 200:
-                    print(f"[GEMINI] ✅ Thẻ {i+1}: API OK (Status 200).", flush=True)
-                    # Xử lý kết quả...
-                    data = ocr_resp.json()
-                    if 'candidates' in data:
-                        text_result = data['candidates'][0]['content']['parts'][0]['text']
-                        numbers = re.findall(r'\d+', text_result)
-                        
-                        p_num, e_num = 0, 1
-                        if len(numbers) >= 2:
-                            p_num, e_num = int(numbers[0]), int(numbers[1])
-                        elif len(numbers) == 1:
-                            p_num = int(numbers[0])
-                        
-                        if p_num > 0:
-                            print(f"[GEMINI] 🎯 Thẻ {i+1}: Tìm thấy Print #{p_num} Ed {e_num}", flush=True)
-                            results.append((i, p_num, e_num))
-                        else:
-                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: API trả về text nhưng không tìm thấy số: '{text_result.strip()}'", flush=True)
-                else:
-                    # NẾU LỖI KEY SẼ HIỆN Ở ĐÂY
-                    print(f"[GEMINI] ❌ Thẻ {i+1}: LỖI API! Status: {ocr_resp.status_code}", flush=True)
-                    print(f"[GEMINI] 📜 Chi tiết lỗi: {ocr_resp.text}", flush=True)
-            
-            except Exception as req_err:
-                 print(f"[GEMINI] ❌ Thẻ {i+1}: Lỗi kết nối mạng: {req_err}", flush=True)
-            
-        return results
+                # Gửi kết quả
+                await send_yoru_style_embed(message.channel, ocr_results)
+            else:
+                # Log màu vàng để dễ nhìn khi không đọc được gì
+                print(f"[{server_name}] ⚠️ [EMPTY] Quét xong nhưng không tìm thấy số Print/Edition nào.")
+        except Exception as e:
+            print(f"[{server_name}] ❌ [ERROR] Lỗi OCR: {e}")
 
-    except Exception as e:
-        print(f"[OCR ERROR] {e}")
-        return []
+    await bot.process_commands(message)
+
+async def send_yoru_style_embed(channel, results):
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    description_lines = []
+    
+    for idx, print_num, edition_num in results:
+        if idx < len(number_emojis):
+            line = f"{number_emojis[idx]} | **#{print_num} · ◈{edition_num}**"
+            description_lines.append(line)
+    
+    if description_lines:
+        try:
+            embed = discord.Embed(description="\n".join(description_lines), color=0x36393f)
+            embed.set_footer(text="Shadow OCR")
+            await channel.send(embed=embed)
+            
+            # --- ĐÂY LÀ DÒNG LOG BẠN YÊU CẦU ---
+            server_name = channel.guild.name if hasattr(channel, 'guild') and channel.guild else "DM"
+            print(f"[{server_name}] 📤 [SENT] Đã gửi kết quả vào kênh: #{channel.name}")
+            # -----------------------------------
+            
+        except Exception as e:
+            print(f"[ERROR] Không gửi được embed: {e}")
+
+@bot.event
+async def on_close():
+    executor.shutdown(wait=True)
+
+def run_discord_bot():
+    token = os.getenv("DISCORD_TOKEN")
+    if token: bot.run(token)
