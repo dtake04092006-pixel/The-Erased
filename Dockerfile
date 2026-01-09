@@ -14,5 +14,6 @@ COPY . .
 # Mở port (Render thường dùng 10000)
 EXPOSE 10000
 
-# Lệnh chạy file main.py
-CMD ["python", "main.py"]
+# --- SỬA DÒNG CUỐI CÙNG NÀY ---
+# Thêm "-u" để tắt buffering, log sẽ hiện ngay lập tức
+CMD ["python", "-u", "main.py"]
