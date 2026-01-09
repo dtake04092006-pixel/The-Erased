@@ -8,7 +8,10 @@ from PIL import Image, ImageEnhance
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Mode 'Nhiều Chuyện' (Full Logs)
+    OCR Engine: Chiến thuật GOM LƯỚI (Grid Strategy)
+    1. Cắt dọc để tách từng thẻ (Chính xác cao).
+    2. Ghép các thẻ con thành 1 ảnh lưới vuông (Tiết kiệm Request).
+    3. Gửi Gemini 1 lần duy nhất.
     """
     if isinstance(api_keys_list, str):
         valid_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
@@ -23,7 +26,7 @@ def scan_image_gemini(image_url, api_keys_list):
     session = requests.Session()
 
     try:
-        # 1. TẢI ẢNH
+        # 1. TẢI ẢNH GỐC
         img_bytes = None
         for _ in range(2):
             try:
@@ -35,32 +38,61 @@ def scan_image_gemini(image_url, api_keys_list):
         
         if not img_bytes: return []
 
-        img = Image.open(io.BytesIO(img_bytes))
-        width, height = img.size
+        original_img = Image.open(io.BytesIO(img_bytes))
+        width, height = original_img.size
         
-        # 2. XỬ LÝ
-        print_crop_top = int(height * 0.80) 
-        crop_img = img.crop((0, print_crop_top, width, height))
+        # 2. CẮT DỌC VÀ GOM VÀO LƯỚI
+        num_cards = 3
+        if width > 1000: num_cards = 4
+        card_width = width // num_cards
         
-        if crop_img.mode != 'RGB': crop_img = crop_img.convert('RGB')
+        # Tạo canvas vuông (đủ chỗ cho 4 thẻ)
+        # Kích thước mỗi ô con trong lưới sẽ là 400x400 (đủ nét)
+        grid_size = 800 
+        cell_size = 400
+        grid_img = Image.new('RGB', (grid_size, grid_size), (0, 0, 0)) # Nền đen
         
-        enhancer = ImageEnhance.Contrast(crop_img)
-        crop_img = enhancer.enhance(1.8)
-        
-        if crop_img.width > 1200:
-            ratio = 1200 / float(crop_img.width)
-            new_height = int((float(crop_img.height) * float(ratio)))
-            crop_img = crop_img.resize((1200, new_height), Image.Resampling.LANCZOS)
+        crops_data = [] # Lưu vị trí để lát nữa map lại kết quả
 
+        for i in range(num_cards):
+            # Cắt từng thẻ ra
+            left = i * card_width
+            right = (i + 1) * card_width
+            
+            # Cắt lấy 20% đáy của thẻ đó (chỗ có số)
+            print_crop_top = int(height * 0.80)
+            crop = original_img.crop((left, print_crop_top, right, height))
+            
+            # Tăng nét cho từng miếng nhỏ
+            if crop.mode != 'RGB': crop = crop.convert('RGB')
+            enhancer = ImageEnhance.Contrast(crop)
+            crop = enhancer.enhance(1.8)
+            
+            # Resize miếng nhỏ về chuẩn 380px để nhét vừa ô 400
+            if crop.width > 380:
+                ratio = 380 / float(crop.width)
+                new_h = int(float(crop.height) * ratio)
+                crop = crop.resize((380, new_h), Image.Resampling.LANCZOS)
+            
+            # Dán vào lưới 2x2
+            # Ô 0: (0,0), Ô 1: (400,0), Ô 2: (0,400), Ô 3: (400,400)
+            x_offset = (i % 2) * cell_size + 10 # +10 padding
+            y_offset = (i // 2) * cell_size + 10
+            
+            grid_img.paste(crop, (x_offset, y_offset))
+            crops_data.append(i) # Đánh dấu thẻ này là thẻ thứ i
+
+        # Lưu ảnh lưới
         buffered = io.BytesIO()
-        crop_img.save(buffered, format="JPEG", quality=90)
+        grid_img.save(buffered, format="JPEG", quality=90)
         img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         # 3. GỬI SANG GEMINI
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Extract all 'Print Number' and 'Edition' pairs from left to right. Format: 'P-E'. Example: '79371-1, 79552-1'."},
+                    # Prompt mới: Bảo nó đọc từng ô
+                    {"text": "This image contains 3 or 4 separate card snippets arranged in a grid. Identify Print Number and Edition for EACH snippet. Ignore the grid layout, just output the list of numbers found. Format: 'P-E'. Example: '79371-1, 79552-1'."},
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
                 ]
             }]
@@ -70,13 +102,11 @@ def scan_image_gemini(image_url, api_keys_list):
         random.shuffle(valid_keys)
 
         for api_key in valid_keys:
-            key_short = api_key[-4:] # Lấy 4 số cuối của key để in log cho gọn
+            key_short = api_key[-4:]
             api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
             
             try:
-                # --- IN LOG GỬI ---
-                print(f"   => [GEMINI] 🚀 Đang gửi ảnh (Key ...{key_short})...", flush=True)
-                
+                print(f"   => [GEMINI] 🚀 Đang gửi ảnh LƯỚI (Key ...{key_short})...", flush=True)
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=7)
                 
                 if ocr_resp.status_code == 200:
@@ -84,34 +114,34 @@ def scan_image_gemini(image_url, api_keys_list):
                     if 'candidates' in data:
                         text = data['candidates'][0]['content']['parts'][0]['text']
                         
-                        # --- IN LOG KẾT QUẢ RAW TỪ GOOGLE ---
-                        # print(f"   => [GEMINI RAW] {text.strip()}", flush=True) # Bật dòng này nếu muốn soi kỹ
-
+                        # Regex siêu mạnh bắt mọi thể loại
                         matches = re.findall(r'(\d+)[\s\-\.·•|]+(\d+)', text)
                         
                         if matches:
                             clean_results = []
-                            for i, (p_str, e_str) in enumerate(matches):
-                                if i > 3: break
-                                p, e = int(p_str), int(e_str)
-                                if p > 0: clean_results.append((i, p, e))
+                            for idx, (p_str, e_str) in enumerate(matches):
+                                # Map lại với index thẻ gốc
+                                if idx < len(crops_data):
+                                    original_idx = crops_data[idx]
+                                    p, e = int(p_str), int(e_str)
+                                    if p > 0:
+                                        clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                # --- IN LOG THÀNH CÔNG ---
                                 print(f"   => [GEMINI] ✅ Đã đọc được: {clean_results}", flush=True)
                                 return clean_results
                         else:
                             print(f"   => [GEMINI] ⚠️ API OK nhưng không thấy số.", flush=True)
-                        
+
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI] ⏳ Key ...{key_short} quá tải. Đổi key...", flush=True)
+                    print(f"   => [GEMINI] ⏳ Key ...{key_short} quá tải. Đổi...", flush=True)
                     continue
 
-            except Exception as e:
-                print(f"   => [GEMINI] ❌ Lỗi mạng với key ...{key_short}: {e}", flush=True)
+            except Exception:
                 continue
         
         return results
 
-    except Exception:
+    except Exception as e:
+        print(f"[OCR ERROR] {e}", flush=True)
         return []
