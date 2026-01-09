@@ -1,8 +1,8 @@
 import discord
 import os
 import asyncio
+import time
 from discord.ext import commands
-from concurrent.futures import ThreadPoolExecutor
 from ocr_engine import scan_image_gemini
 
 # --- CẤU HÌNH ---
@@ -11,27 +11,70 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# TĂNG LÊN 50 WORKERS ĐỂ CÂN 200 SERVER
-executor = ThreadPoolExecutor(max_workers=50)
-
 KARUTA_ID = 646937666251915264
+
+# Hàng chờ xử lý ảnh
+drop_queue = asyncio.Queue()
 
 def get_gemini_keys():
     keys = os.getenv("GEMINI_API_KEY", "")
     return keys.split(",") if keys else []
 
+async def worker():
+    """
+    Nhân viên xử lý hàng chờ.
+    Nó sẽ lấy từng drop ra và xử lý từ từ để không bị Google chặn.
+    """
+    print("👷 Worker đã khởi động, đang chờ việc...", flush=True)
+    while True:
+        # Lấy một drop từ hàng chờ
+        ctx = await drop_queue.get()
+        message, image_url, server_name = ctx
+        
+        try:
+            print(f"⚡ [QUEUE] Đang xử lý: {server_name} (Còn lại trong hàng chờ: {drop_queue.qsize()})", flush=True)
+            
+            gemini_keys = get_gemini_keys()
+            
+            # Chạy OCR (Code OCR Engine của bạn)
+            # Chạy trong Executor để không chặn luồng chính của Bot
+            loop = asyncio.get_event_loop()
+            ocr_results = await loop.run_in_executor(
+                None, scan_image_gemini, image_url, gemini_keys
+            )
+            
+            if ocr_results:
+                print(f"✅ [DONE] {server_name}: {ocr_results}", flush=True)
+                await send_yoru_style_embed(message.channel, ocr_results)
+            else:
+                pass # Không tìm thấy số hoặc lỗi OCR
+
+        except Exception as e:
+            print(f"❌ [WORKER ERROR] {server_name}: {e}", flush=True)
+        
+        finally:
+            drop_queue.task_done()
+            # --- QUAN TRỌNG NHẤT: NGHỈ NGƠI ---
+            # Nghỉ 1 giây trước khi làm việc tiếp theo.
+            # Điều này giúp request rải đều ra, không bị dồn cục.
+            # Với 10 Key, bạn có thể giảm xuống 0.5 hoặc 0.2
+            await asyncio.sleep(0.5) 
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot Online: {bot.user.name}")
-    print(f"✅ Sẵn sàng chiến đấu trên {len(bot.guilds)} server!")
+    print(f"✅ Đang canh gác trên {len(bot.guilds)} server!")
+    # Khởi động 3 nhân viên xử lý song song
+    # 3 nhân viên * 0.5s nghỉ = Xử lý được khoảng 6 drop/giây (An toàn cho 10 Key)
+    for _ in range(3):
+        bot.loop.create_task(worker())
 
 @bot.event
 async def on_message(message):
-    # Chỉ nhận tin từ Karuta
     if message.author.id != KARUTA_ID:
         return 
 
-    # Check nhanh nội dung drop
+    # Check drop
     is_dropping = False
     if message.content and "dropping" in message.content.lower():
         is_dropping = True
@@ -42,9 +85,6 @@ async def on_message(message):
 
     if not is_dropping:
         return
-
-    # --- ĐÃ XÓA BỎ ĐOẠN CHECK "RATE LIMIT" Ở ĐÂY ---
-    # Bot sẽ xử lý mọi drop ngay lập tức bất kể tốc độ
 
     # Lấy ảnh
     image_url = None
@@ -58,25 +98,9 @@ async def on_message(message):
 
     if image_url:
         server_name = message.guild.name if message.guild else "DM"
-        # Log gọn lại để đỡ rối mắt
-        print(f"[{server_name}] ⚡ DROP! Gửi Gemini...", flush=True)
-        
-        gemini_keys = get_gemini_keys()
-        
-        try:
-            # Chạy OCR bất đồng bộ
-            ocr_results = await bot.loop.run_in_executor(
-                executor, scan_image_gemini, image_url, gemini_keys
-            )
-            
-            if ocr_results:
-                print(f"[{server_name}] ✅ KẾT QUẢ: {ocr_results}", flush=True)
-                await send_yoru_style_embed(message.channel, ocr_results)
-            else:
-                # Log lỗi nhưng không spam
-                pass 
-        except Exception as e:
-            print(f"[{server_name}] ❌ Lỗi: {e}", flush=True)
+        # Thay vì xử lý ngay, ta ĐẨY VÀO HÀNG CHỜ
+        print(f"📥 [QUEUE] Đã nhận drop từ {server_name}. Đang xếp hàng...", flush=True)
+        await drop_queue.put((message, image_url, server_name))
 
     await bot.process_commands(message)
 
@@ -94,12 +118,11 @@ async def send_yoru_style_embed(channel, results):
             embed = discord.Embed(description="\n".join(description_lines), color=0x36393f)
             embed.set_footer(text="Shadow OCR")
             await channel.send(embed=embed)
-            print(f"   => 📤 Đã gửi tin nhắn cho {channel.guild.name}", flush=True)
         except: pass
 
 @bot.event
 async def on_close():
-    executor.shutdown(wait=True)
+    pass
 
 def run_discord_bot():
     token = os.getenv("DISCORD_TOKEN")
