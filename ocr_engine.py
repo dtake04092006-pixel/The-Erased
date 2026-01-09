@@ -7,7 +7,7 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    OCR Engine - Đã Fix lỗi 404 bằng cách đổi Model Name.
+    OCR Engine - Đã Fix lỗi 404 bằng cách dùng model 'gemini-1.5-flash-latest'
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
@@ -42,8 +42,8 @@ def scan_image_gemini(image_url, api_keys):
         api_key = random.choice(valid_keys).strip()
         key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
         
-        # --- SỬA LỖI Ở ĐÂY: Đổi sang 'gemini-1.5-flash-latest' ---
-        # Nếu vẫn lỗi, bạn có thể thử đổi thành 'gemini-2.0-flash-exp'
+        # --- FIX LỖI 404 TẠI ĐÂY ---
+        # Đổi từ 'gemini-1.5-flash' thành 'gemini-1.5-flash-latest'
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
 
         print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
@@ -82,6 +82,9 @@ def scan_image_gemini(image_url, api_keys):
                 if ocr_resp.status_code == 200:
                     print(f"[GEMINI] ✅ Thẻ {i+1}: API OK (Status 200).", flush=True)
                     data = ocr_resp.json()
+                    # Log raw data để xem google trả về gì nếu không tìm thấy số
+                    # print(f"[DEBUG RAW] {data}") 
+                    
                     if 'candidates' in data:
                         text_result = data['candidates'][0]['content']['parts'][0]['text']
                         numbers = re.findall(r'\d+', text_result)
@@ -96,7 +99,7 @@ def scan_image_gemini(image_url, api_keys):
                             print(f"[GEMINI] 🎯 Thẻ {i+1}: Tìm thấy Print #{p_num} Ed {e_num}", flush=True)
                             results.append((i, p_num, e_num))
                         else:
-                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: API trả về text nhưng không tìm thấy số: '{text_result.strip()}'", flush=True)
+                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: Không tìm thấy số trong: '{text_result.strip()}'", flush=True)
                 else:
                     print(f"[GEMINI] ❌ Thẻ {i+1}: LỖI API! Status: {ocr_resp.status_code}", flush=True)
                     print(f"[GEMINI] 📜 Chi tiết lỗi: {ocr_resp.text}", flush=True)
