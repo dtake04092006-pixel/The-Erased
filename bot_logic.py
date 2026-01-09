@@ -139,4 +139,3 @@ def run_discord_bot():
     token = os.getenv("DISCORD_TOKEN")
     if token: bot.run(token)
     else: print("❌ Thiếu DISCORD_TOKEN")
-        
