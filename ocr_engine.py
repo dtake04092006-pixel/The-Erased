@@ -7,15 +7,15 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    Logic kết hợp: Dùng AI Gemini nhưng cắt ảnh theo tỷ lệ chuẩn của code cũ (0.86)
+    OCR Engine với Log chi tiết trạng thái API để debug Key.
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
-        print("[OCR] ❌ Chưa nhập GEMINI_API_KEY!")
+        print("[OCR] ❌ Chưa nhập GEMINI_API_KEY trong Environment Variables!")
         return []
 
     try:
-        # Tải ảnh (Thử lại 3 lần giống code cũ để tránh mạng lag)
+        # Tải ảnh (Retry 3 lần)
         img_bytes = None
         for attempt in range(3):
             try:
@@ -25,40 +25,45 @@ def scan_image_gemini(image_url, api_keys):
                     break
             except: pass
         
-        if not img_bytes: return []
+        if not img_bytes: 
+            print("[OCR] ❌ Không tải được ảnh từ Discord (URL lỗi hoặc mạng lag).")
+            return []
 
         img = Image.open(io.BytesIO(img_bytes))
         width, height = img.size
         
-        # --- LOGIC CŨ: Xác định số thẻ ---
-        # Code mẫu: num_cards = 4 if width > 1000 else 3
+        # Logic cắt ảnh
         num_cards = 3 
         if width > 1000: num_cards = 4
-        
         card_width = width // num_cards
         results = []
         
+        # Chọn Key ngẫu nhiên
         api_key = random.choice(valid_keys).strip()
+        # Lấy 4 ký tự cuối của key để log (giúp bạn biết key nào đang chạy mà ko lộ hết key)
+        key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
+        
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+
+        print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
 
         for i in range(num_cards):
             left = i * card_width
             right = (i + 1) * card_width
             
-            # --- LOGIC CŨ: CẮT ẢNH Ở 0.86 (Chuẩn hơn 0.85) ---
+            # Cắt 15% dưới (Tỷ lệ 0.86 như code cũ của bạn)
             print_crop_top = int(height * 0.86) 
             crop_img = img.crop((left, print_crop_top, right, height))
             
-            # --- FIX LỖI RGBA (Code cũ convert 'L' trắng đen, Gemini cần 'RGB' màu) ---
+            # Fix lỗi RGBA
             if crop_img.mode in ("RGBA", "P"):
                 crop_img = crop_img.convert("RGB")
             
-            # Base64 hóa
+            # Base64
             buffered = io.BytesIO()
             crop_img.save(buffered, format="JPEG")
             img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-            # Prompt chuẩn
             payload = {
                 "contents": [{
                     "parts": [
@@ -68,27 +73,39 @@ def scan_image_gemini(image_url, api_keys):
                 }]
             }
             
-            ocr_resp = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
+            # --- LOG QUAN TRỌNG: BÁO CÁO GỬI API ---
+            print(f"[GEMINI] 📤 Thẻ {i+1}: Đang gửi tới Google (Key: ...{key_suffix})...", flush=True)
             
-            if ocr_resp.status_code == 200:
-                data = ocr_resp.json()
-                try:
+            try:
+                ocr_resp = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+                
+                # --- LOG QUAN TRỌNG: TRẠNG THÁI PHẢN HỒI ---
+                if ocr_resp.status_code == 200:
+                    print(f"[GEMINI] ✅ Thẻ {i+1}: API OK (Status 200).", flush=True)
+                    # Xử lý kết quả...
+                    data = ocr_resp.json()
                     if 'candidates' in data:
                         text_result = data['candidates'][0]['content']['parts'][0]['text']
                         numbers = re.findall(r'\d+', text_result)
                         
                         p_num, e_num = 0, 1
-                        
                         if len(numbers) >= 2:
-                            p_num = int(numbers[0])
-                            e_num = int(numbers[1])
+                            p_num, e_num = int(numbers[0]), int(numbers[1])
                         elif len(numbers) == 1:
-                            # Logic dự phòng nếu dính số
                             p_num = int(numbers[0])
                         
                         if p_num > 0:
+                            print(f"[GEMINI] 🎯 Thẻ {i+1}: Tìm thấy Print #{p_num} Ed {e_num}", flush=True)
                             results.append((i, p_num, e_num))
-                except: pass
+                        else:
+                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: API trả về text nhưng không tìm thấy số: '{text_result.strip()}'", flush=True)
+                else:
+                    # NẾU LỖI KEY SẼ HIỆN Ở ĐÂY
+                    print(f"[GEMINI] ❌ Thẻ {i+1}: LỖI API! Status: {ocr_resp.status_code}", flush=True)
+                    print(f"[GEMINI] 📜 Chi tiết lỗi: {ocr_resp.text}", flush=True)
+            
+            except Exception as req_err:
+                 print(f"[GEMINI] ❌ Thẻ {i+1}: Lỗi kết nối mạng: {req_err}", flush=True)
             
         return results
 
