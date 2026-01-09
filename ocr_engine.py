@@ -7,7 +7,7 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    OCR Engine - Sử dụng Model gemini-1.5-flash-latest (Bản ổn định nhất hiện tại)
+    OCR Engine - Sử dụng Model 'gemini-3-flash-preview' (Theo ảnh Google AI Studio 2026 của bạn)
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
@@ -42,12 +42,11 @@ def scan_image_gemini(image_url, api_keys):
         api_key = random.choice(valid_keys).strip()
         key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
         
-        # --- ĐÂY LÀ CHỖ QUAN TRỌNG NHẤT ---
-        # Tôi dùng 'gemini-1.5-flash-latest' vì nó ổn định nhất cho OCR
-        # Nếu bạn muốn dùng bản mới trong ảnh, đổi thành: 'gemini-3-flash-preview'
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+        # --- SỬA CHUẨN THEO ẢNH CỦA BẠN ---
+        # Model: gemini-3-flash-preview
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
 
-        print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
+        print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ (Model: Gemini 3 Flash)...", flush=True)
 
         for i in range(num_cards):
             left = i * card_width
@@ -98,7 +97,7 @@ def scan_image_gemini(image_url, api_keys):
                             print(f"[GEMINI] 🎯 Thẻ {i+1}: Tìm thấy Print #{p_num} Ed {e_num}", flush=True)
                             results.append((i, p_num, e_num))
                         else:
-                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: Không tìm thấy số trong: '{text_result.strip()}'", flush=True)
+                            print(f"[GEMINI] ⚠️ Thẻ {i+1}: API trả về text nhưng không tìm thấy số: '{text_result.strip()}'", flush=True)
                 else:
                     print(f"[GEMINI] ❌ Thẻ {i+1}: LỖI API! Status: {ocr_resp.status_code}", flush=True)
                     print(f"[GEMINI] 📜 Chi tiết lỗi: {ocr_resp.text}", flush=True)
