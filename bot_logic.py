@@ -13,8 +13,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 KARUTA_ID = 646937666251915264
 
-# Hàng chờ xử lý ảnh
-drop_queue = asyncio.Queue()
+# Khởi tạo là None, sẽ tạo Queue thật khi Bot đã vào guồng
+drop_queue = None 
 
 def get_gemini_keys():
     keys = os.getenv("GEMINI_API_KEY", "")
@@ -23,22 +23,27 @@ def get_gemini_keys():
 async def worker():
     """
     Nhân viên xử lý hàng chờ.
-    Nó sẽ lấy từng drop ra và xử lý từ từ để không bị Google chặn.
     """
+    global drop_queue
     print("👷 Worker đã khởi động, đang chờ việc...", flush=True)
+    
     while True:
-        # Lấy một drop từ hàng chờ
+        # Chờ queue được khởi tạo
+        if drop_queue is None:
+            await asyncio.sleep(1)
+            continue
+
+        # Lấy việc
         ctx = await drop_queue.get()
         message, image_url, server_name = ctx
         
         try:
-            print(f"⚡ [QUEUE] Đang xử lý: {server_name} (Còn lại trong hàng chờ: {drop_queue.qsize()})", flush=True)
+            print(f"⚡ [QUEUE] Đang xử lý: {server_name} (Còn lại: {drop_queue.qsize()})", flush=True)
             
             gemini_keys = get_gemini_keys()
             
-            # Chạy OCR (Code OCR Engine của bạn)
-            # Chạy trong Executor để không chặn luồng chính của Bot
-            loop = asyncio.get_event_loop()
+            # Chạy OCR trong luồng riêng để không chặn bot
+            loop = asyncio.get_running_loop()
             ocr_results = await loop.run_in_executor(
                 None, scan_image_gemini, image_url, gemini_keys
             )
@@ -47,25 +52,27 @@ async def worker():
                 print(f"✅ [DONE] {server_name}: {ocr_results}", flush=True)
                 await send_yoru_style_embed(message.channel, ocr_results)
             else:
-                pass # Không tìm thấy số hoặc lỗi OCR
+                pass 
 
         except Exception as e:
             print(f"❌ [WORKER ERROR] {server_name}: {e}", flush=True)
         
         finally:
             drop_queue.task_done()
-            # --- QUAN TRỌNG NHẤT: NGHỈ NGƠI ---
-            # Nghỉ 1 giây trước khi làm việc tiếp theo.
-            # Điều này giúp request rải đều ra, không bị dồn cục.
-            # Với 10 Key, bạn có thể giảm xuống 0.5 hoặc 0.2
-            await asyncio.sleep(0.5) 
+            # Nghỉ 0.5s để tránh spam Google (có thể giảm xuống 0.2 nếu nhiều key)
+            await asyncio.sleep(0.5)
 
 @bot.event
 async def on_ready():
+    global drop_queue
     print(f"✅ Bot Online: {bot.user.name}")
-    print(f"✅ Đang canh gác trên {len(bot.guilds)} server!")
-    # Khởi động 3 nhân viên xử lý song song
-    # 3 nhân viên * 0.5s nghỉ = Xử lý được khoảng 6 drop/giây (An toàn cho 10 Key)
+    
+    # --- FIX LỖI Ở ĐÂY: TẠO QUEUE TRONG LOOP CỦA BOT ---
+    if drop_queue is None:
+        drop_queue = asyncio.Queue()
+        print("✅ Đã khởi tạo Hàng Chờ (Queue) thành công!", flush=True)
+    
+    # Khởi động 3 nhân viên
     for _ in range(3):
         bot.loop.create_task(worker())
 
@@ -98,9 +105,13 @@ async def on_message(message):
 
     if image_url:
         server_name = message.guild.name if message.guild else "DM"
-        # Thay vì xử lý ngay, ta ĐẨY VÀO HÀNG CHỜ
-        print(f"📥 [QUEUE] Đã nhận drop từ {server_name}. Đang xếp hàng...", flush=True)
-        await drop_queue.put((message, image_url, server_name))
+        
+        # Đẩy vào hàng chờ (nếu queue đã sẵn sàng)
+        if drop_queue is not None:
+            print(f"📥 [QUEUE] Đã nhận drop từ {server_name}. Đang xếp hàng...", flush=True)
+            await drop_queue.put((message, image_url, server_name))
+        else:
+            print(f"⚠️ [WARN] Drop từ {server_name} bị bỏ qua vì Bot chưa load xong Queue.", flush=True)
 
     await bot.process_commands(message)
 
