@@ -11,7 +11,7 @@ intents = discord.Intents.default()
 intents.message_content = True 
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-executor = ThreadPoolExecutor(max_workers=3)
+executor = ThreadPoolExecutor(max_workers=20)
 recent_drops = deque(maxlen=5)
 
 KARUTA_ID = 646937666251915264
