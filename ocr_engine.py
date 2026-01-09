@@ -1,141 +1,133 @@
-import discord
-import os
-import asyncio
+import requests
+import io
+import base64
+import re
+import random
 import time
-from discord.ext import commands
-from ocr_engine import scan_image_gemini
+import os
+from PIL import Image, ImageEnhance
 
-# --- CẤU HÌNH ---
-intents = discord.Intents.default()
-intents.message_content = True 
+# --- CẤU HÌNH GROQ ---
+# Bạn cần nhập GROQ_API_KEY vào biến môi trường trên Render
+# Nếu có nhiều Key, cách nhau bằng dấu phẩy: key1,key2,key3
+def get_groq_keys(api_keys_raw):
+    # Nếu api_keys_raw là list (do code cũ truyền vào), gộp lại rồi tách ra
+    if isinstance(api_keys_raw, list):
+        # Đây là fix tạm nếu code bot_logic vẫn truyền list
+        return [k for k in api_keys_raw if k.strip()]
+    return [k.strip() for k in api_keys_raw.split(',') if k.strip()]
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-KARUTA_ID = 646937666251915264
-
-# Khởi tạo là None, sẽ tạo Queue thật khi Bot đã vào guồng
-drop_queue = None 
-
-def get_gemini_keys():
-    keys = os.getenv("GEMINI_API_KEY", "")
-    return keys.split(",") if keys else []
-
-async def worker():
+def scan_image_gemini(image_url, api_keys_list):
     """
-    Nhân viên xử lý hàng chờ.
+    OCR Engine: Chuyển sang dùng GROQ (Llama 3.2 Vision).
+    Tên hàm giữ nguyên là 'scan_image_gemini' để không phải sửa bên bot_logic.py
+    nhưng ruột thì chạy bằng Groq.
     """
-    global drop_queue
-    print("👷 Worker đã khởi động, đang chờ việc...", flush=True)
-    
-    while True:
-        # Chờ queue được khởi tạo
-        if drop_queue is None:
-            await asyncio.sleep(1)
-            continue
+    # Lọc key (Groq Key thường bắt đầu bằng 'gsk_')
+    valid_keys = [k for k in api_keys_list if k.strip()]
+    if not valid_keys:
+        print("[OCR] ❌ Thiếu GROQ_API_KEY!", flush=True)
+        return []
 
-        # Lấy việc
-        ctx = await drop_queue.get()
-        message, image_url, server_name = ctx
+    headers_img = {"User-Agent": "Mozilla/5.0"}
+    session = requests.Session()
+
+    try:
+        # 1. TẢI ẢNH & XỬ LÝ (Giữ nguyên logic Cắt Ngang cũ vì nó tối ưu)
+        img_bytes = None
+        for _ in range(2):
+            try:
+                resp = session.get(image_url, headers=headers_img, timeout=5)
+                if resp.status_code == 200:
+                    img_bytes = resp.content
+                    break
+            except: time.sleep(0.2)
         
-        try:
-            print(f"⚡ [QUEUE] Đang xử lý: {server_name} (Còn lại: {drop_queue.qsize()})", flush=True)
-            
-            gemini_keys = get_gemini_keys()
-            
-            # Chạy OCR trong luồng riêng để không chặn bot
-            loop = asyncio.get_running_loop()
-            ocr_results = await loop.run_in_executor(
-                None, scan_image_gemini, image_url, gemini_keys
-            )
-            
-            if ocr_results:
-                print(f"✅ [DONE] {server_name}: {ocr_results}", flush=True)
-                await send_yoru_style_embed(message.channel, ocr_results)
-            else:
-                pass 
+        if not img_bytes: return []
 
-        except Exception as e:
-            print(f"❌ [WORKER ERROR] {server_name}: {e}", flush=True)
+        img = Image.open(io.BytesIO(img_bytes))
+        width, height = img.size
         
-        finally:
-            drop_queue.task_done()
-            # Nghỉ 0.5s để tránh spam Google (có thể giảm xuống 0.2 nếu nhiều key)
-            await asyncio.sleep(0.5)
-
-@bot.event
-async def on_ready():
-    global drop_queue
-    print(f"✅ Bot Online: {bot.user.name}")
-    
-    # --- FIX LỖI Ở ĐÂY: TẠO QUEUE TRONG LOOP CỦA BOT ---
-    if drop_queue is None:
-        drop_queue = asyncio.Queue()
-        print("✅ Đã khởi tạo Hàng Chờ (Queue) thành công!", flush=True)
-    
-    # Khởi động 3 nhân viên
-    for _ in range(3):
-        bot.loop.create_task(worker())
-
-@bot.event
-async def on_message(message):
-    if message.author.id != KARUTA_ID:
-        return 
-
-    # Check drop
-    is_dropping = False
-    if message.content and "dropping" in message.content.lower():
-        is_dropping = True
-    elif message.embeds:
-        desc = message.embeds[0].description or ""
-        if "dropping" in desc.lower():
-            is_dropping = True
-
-    if not is_dropping:
-        return
-
-    # Lấy ảnh
-    image_url = None
-    if message.embeds:
-        if message.embeds[0].image:
-            image_url = message.embeds[0].image.url
-        elif message.embeds[0].thumbnail:
-            image_url = message.embeds[0].thumbnail.url
-    elif message.attachments:
-        image_url = message.attachments[0].url
-
-    if image_url:
-        server_name = message.guild.name if message.guild else "DM"
+        # Cắt dải ngang dưới đáy (15%)
+        print_crop_top = int(height * 0.85) 
+        crop_img = img.crop((0, print_crop_top, width, height))
         
-        # Đẩy vào hàng chờ (nếu queue đã sẵn sàng)
-        if drop_queue is not None:
-            print(f"📥 [QUEUE] Đã nhận drop từ {server_name}. Đang xếp hàng...", flush=True)
-            await drop_queue.put((message, image_url, server_name))
-        else:
-            print(f"⚠️ [WARN] Drop từ {server_name} bị bỏ qua vì Bot chưa load xong Queue.", flush=True)
+        if crop_img.mode != 'RGB': crop_img = crop_img.convert('RGB')
+        
+        # Tăng tương phản cho Llama dễ đọc
+        enhancer = ImageEnhance.Contrast(crop_img)
+        crop_img = enhancer.enhance(1.5)
+        
+        # Resize nhỏ lại (Groq giới hạn kích thước ảnh input)
+        if crop_img.width > 800:
+            ratio = 800 / float(crop_img.width)
+            new_height = int((float(crop_img.height) * float(ratio)))
+            crop_img = crop_img.resize((800, new_height), Image.Resampling.LANCZOS)
 
-    await bot.process_commands(message)
+        buffered = io.BytesIO()
+        crop_img.save(buffered, format="JPEG", quality=80)
+        img_b64 = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
 
-async def send_yoru_style_embed(channel, results):
-    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-    description_lines = []
-    
-    for idx, print_num, edition_num in results:
-        if idx < len(number_emojis):
-            line = f"{number_emojis[idx]} | **#{print_num} · ◈{edition_num}**"
-            description_lines.append(line)
-    
-    if description_lines:
-        try:
-            embed = discord.Embed(description="\n".join(description_lines), color=0x36393f)
-            embed.set_footer(text="Shadow OCR")
-            await channel.send(embed=embed)
-        except: pass
+        # 2. GỬI SANG GROQ
+        random.shuffle(valid_keys)
+        
+        for api_key in valid_keys:
+            # Endpoint chuẩn của Groq
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                # Model Vision của Groq (QUAN TRỌNG: Phải dùng đúng tên này)
+                "model": "llama-3.2-11b-vision-preview",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract Print Number and Edition. Return ONLY list format: 'P-E'. Example: '123-1, 56-2'. If no edition, use 1."},
+                            {"type": "image_url", "image_url": {"url": img_b64}}
+                        ]
+                    }
+                ],
+                "temperature": 0.1, # Giảm sáng tạo để đọc số chuẩn hơn
+                "max_tokens": 100
+            }
 
-@bot.event
-async def on_close():
-    pass
+            try:
+                # Gửi request
+                resp = session.post(url, json=payload, headers=headers, timeout=6)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data['choices'][0]['message']['content']
+                    
+                    # Regex tìm số
+                    matches = re.findall(r'(\d+)[\s\-\.]+(\d+)', content)
+                    if matches:
+                        results = []
+                        for i, (p_str, e_str) in enumerate(matches):
+                            if i > 3: break
+                            results.append((i, int(p_str), int(e_str)))
+                        return results
+                    else:
+                        # Groq trả lời nhưng không tìm thấy số
+                        return []
+                
+                elif resp.status_code == 429:
+                    print(f"[GROQ] ⏳ Key ...{api_key[-4:]} bị Rate Limit. Đổi key...", flush=True)
+                    continue
+                else:
+                    print(f"[GROQ] ❌ Lỗi {resp.status_code}: {resp.text}", flush=True)
+                    continue
 
-def run_discord_bot():
-    token = os.getenv("DISCORD_TOKEN")
-    if token: bot.run(token)
-    else: print("❌ Thiếu DISCORD_TOKEN")
+            except Exception as e:
+                print(f"[GROQ] 🔌 Lỗi mạng: {e}", flush=True)
+                continue
+        
+        return []
+
+    except Exception:
+        return []
