@@ -8,14 +8,15 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    OCR Engine: Cắt thẻ (Crop) + Auto-Switch Key + Log chi tiết.
+    OCR Engine: CẮT NGANG (Horizontal Crop)
+    - Cắt 1 dải ngang dưới đáy ảnh (chứa Print/Edition của cả 3 thẻ).
+    - Gửi 1 lần duy nhất lên Google -> Tiết kiệm 3 lần request.
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
         print("[OCR] ❌ Chưa nhập GEMINI_API_KEY!", flush=True)
         return []
 
-    # Giả lập trình duyệt để không bị Discord chặn tải ảnh
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -23,7 +24,7 @@ def scan_image_gemini(image_url, api_keys):
     session = requests.Session()
 
     try:
-        # 1. TẢI ẢNH (Có Retry & Log)
+        # 1. TẢI ẢNH
         img_bytes = None
         for attempt in range(3):
             try:
@@ -31,95 +32,92 @@ def scan_image_gemini(image_url, api_keys):
                 if resp.status_code == 200:
                     img_bytes = resp.content
                     break
-                else:
-                    print(f"[OCR] ⚠️ Tải ảnh lỗi {resp.status_code} (Lần {attempt+1})", flush=True)
-            except Exception as e:
-                print(f"[OCR] ⚠️ Lỗi mạng khi tải ảnh: {e}", flush=True)
-                time.sleep(0.5)
+            except: time.sleep(0.5)
         
-        if not img_bytes: 
-            print("[OCR] ❌ Tải ảnh thất bại hoàn toàn!", flush=True)
-            return []
+        if not img_bytes: return []
 
         img = Image.open(io.BytesIO(img_bytes))
         width, height = img.size
         
-        # Logic xác định số thẻ
-        num_cards = 3 
-        if width > 1000: num_cards = 4
-        card_width = width // num_cards
-        results = []
+        # --- LOGIC CẮT NGANG (QUAN TRỌNG) ---
+        # Thay vì chia cột, ta cắt một dải ngang ở đáy (14% dưới cùng)
+        # Dải này sẽ chứa toàn bộ chân của 3 (hoặc 4) thẻ
+        print_crop_top = int(height * 0.86) 
         
-        print(f"[GEMINI] 📸 Ảnh {width}x{height} -> Cắt {num_cards} thẻ. Đang gửi đi...", flush=True)
+        # Cắt: (Từ trái 0, Từ trên 86%, Đến hết phải, Đến hết dưới)
+        crop_img = img.crop((0, print_crop_top, width, height))
+        
+        # Chuyển màu & Nén
+        if crop_img.mode in ("RGBA", "P"):
+            crop_img = crop_img.convert("RGB")
+        
+        # Resize bề ngang max 1000px cho nhẹ (Gemini vẫn đọc tốt)
+        if crop_img.width > 1000:
+            ratio = 1000 / float(crop_img.width)
+            new_height = int((float(crop_img.height) * float(ratio)))
+            crop_img = crop_img.resize((1000, new_height), Image.Resampling.LANCZOS)
 
-        # 2. XỬ LÝ TỪNG THẺ
-        for i in range(num_cards):
-            left = i * card_width
-            right = (i + 1) * card_width
-            
-            # Cắt 14% dưới cùng (Tỷ lệ 0.86 từ trên xuống)
-            print_crop_top = int(height * 0.86) 
-            crop_img = img.crop((left, print_crop_top, right, height))
-            
-            if crop_img.mode in ("RGBA", "P"):
-                crop_img = crop_img.convert("RGB")
-            
-            # Base64
-            buffered = io.BytesIO()
-            crop_img.save(buffered, format="JPEG", quality=80)
-            img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        buffered = io.BytesIO()
+        crop_img.save(buffered, format="JPEG", quality=80)
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": "Read Print and Edition. Output format: 'Print Edition'. Example: '1234 2'. Assume 1 if no edition."},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-                    ]
-                }]
-            }
-            
-            # Logic xoay vòng Key
-            random.shuffle(valid_keys)
-            card_done = False
+        # --- PROMPT MỚI: DẠY GEMINI ĐỌC DẢI NGANG ---
+        payload = {
+            "contents": [{
+                "parts": [
+                    # Prompt này bảo nó: Nhìn từ trái sang phải, thấy cặp số nào thì liệt kê ra hết
+                    {"text": "Look at this image strip from left to right. Identify Print Number and Edition for each card section. Output a list of 'Print-Edition' pairs. Example output: '1234-1, 567-2, 99-1'."},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }]
+        }
+        
+        results = []
+        random.shuffle(valid_keys)
+        success = False
 
-            for api_key in valid_keys:
-                key_short = api_key[-4:]
-                api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
+        # Thử gửi (vẫn có Auto-Switch Key để an toàn)
+        for api_key in valid_keys:
+            key_short = api_key[-4:]
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
+            
+            try:
+                print(f"[GEMINI] 🚀 Đang gửi dải ảnh ngang (Key ...{key_short})...", flush=True)
+                ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
-                try:
-                    ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=6)
-                    
-                    if ocr_resp.status_code == 200:
-                        data = ocr_resp.json()
-                        if 'candidates' in data:
-                            text = data['candidates'][0]['content']['parts'][0]['text']
-                            nums = re.findall(r'\d+', text)
-                            
-                            p, e = 0, 1
-                            if len(nums) >= 2: p, e = int(nums[0]), int(nums[1])
-                            elif len(nums) == 1: p = int(nums[0])
-                            
-                            if p > 0:
-                                print(f"[GEMINI] 🎯 Thẻ {i+1}: Print #{p} Ed {e} (Key ...{key_short})", flush=True)
-                                results.append((i, p, e))
-                            else:
-                                print(f"[GEMINI] ⚠️ Thẻ {i+1}: Không thấy số. Raw: '{text.strip()}'", flush=True)
-                        card_done = True
-                        break # Done card, next
-                    
-                    elif ocr_resp.status_code == 429:
-                        print(f"[GEMINI] ⏳ Key ...{key_short} quá tải (429). Đổi key...", flush=True)
-                        continue
-                    else:
-                        print(f"[GEMINI] ❌ Lỗi {ocr_resp.status_code} key ...{key_short}", flush=True)
-                        continue
+                if ocr_resp.status_code == 200:
+                    data = ocr_resp.json()
+                    if 'candidates' in data:
+                        text = data['candidates'][0]['content']['parts'][0]['text']
+                        
+                        # Regex tìm tất cả cặp số (dạng 123-1 hoặc 123 1)
+                        # Nó sẽ trả về list các cặp [(123, 1), (567, 2), ...]
+                        matches = re.findall(r'(\d+)[\s\-\.]+(\d+)', text)
+                        
+                        if matches:
+                            print(f"[GEMINI] ✅ Đọc thành công: {matches}", flush=True)
+                            for i, (p_str, e_str) in enumerate(matches):
+                                # Giới hạn 4 thẻ để tránh lỗi
+                                if i > 3: break
+                                results.append((i, int(p_str), int(e_str)))
+                            success = True
+                            break # Xong việc, thoát vòng lặp key
+                        else:
+                            print(f"[GEMINI] ⚠️ Không tìm thấy số nào trong dải ảnh.", flush=True)
+                            # Không break, thử key khác xem có thông minh hơn không (hiếm khi cần)
+                            break 
 
-                except Exception as e:
+                elif ocr_resp.status_code == 429:
+                    print(f"[GEMINI] ⏳ Key ...{key_short} quá tải. Đổi key...", flush=True)
                     continue
-            
-            if not card_done:
-                print(f"[GEMINI] 💀 Thẻ {i+1}: Thất bại mọi key.", flush=True)
+                else:
+                    print(f"[GEMINI] ❌ Lỗi {ocr_resp.status_code}. Đổi key...", flush=True)
+                    continue
 
+            except Exception as e:
+                print(f"[GEMINI] 🔌 Lỗi mạng: {e}", flush=True)
+                continue
+        
         return results
 
     except Exception as e:
