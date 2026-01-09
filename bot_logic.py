@@ -1,141 +1,102 @@
-import discord
-import os
-import asyncio
+import requests
+import io
+import base64
+import re
+import random
 import time
-from discord.ext import commands
-from ocr_engine import scan_image_gemini
+from PIL import Image, ImageEnhance
 
-# --- CẤU HÌNH ---
-intents = discord.Intents.default()
-intents.message_content = True 
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-KARUTA_ID = 646937666251915264
-
-# Khởi tạo là None, sẽ tạo Queue thật khi Bot đã vào guồng
-drop_queue = None 
-
-def get_gemini_keys():
-    keys = os.getenv("GEMINI_API_KEY", "")
-    return keys.split(",") if keys else []
-
-async def worker():
+def scan_image_gemini(image_url, api_keys):
     """
-    Nhân viên xử lý hàng chờ.
+    OCR Engine: Sử dụng model gemini-1.5-flash-8b (Bản siêu nhẹ)
     """
-    global drop_queue
-    print("👷 Worker đã khởi động, đang chờ việc...", flush=True)
-    
-    while True:
-        # Chờ queue được khởi tạo
-        if drop_queue is None:
-            await asyncio.sleep(1)
-            continue
+    valid_keys = [k for k in api_keys if k.strip()]
+    if not valid_keys: return []
 
-        # Lấy việc
-        ctx = await drop_queue.get()
-        message, image_url, server_name = ctx
+    headers = {"User-Agent": "Mozilla/5.0"}
+    session = requests.Session()
+
+    try:
+        # Tải ảnh
+        img_bytes = None
+        for _ in range(2):
+            try:
+                resp = session.get(image_url, headers=headers, timeout=5)
+                if resp.status_code == 200:
+                    img_bytes = resp.content
+                    break
+            except: time.sleep(0.2)
         
-        try:
-            print(f"⚡ [QUEUE] Đang xử lý: {server_name} (Còn lại: {drop_queue.qsize()})", flush=True)
-            
-            gemini_keys = get_gemini_keys()
-            
-            # Chạy OCR trong luồng riêng để không chặn bot
-            loop = asyncio.get_running_loop()
-            ocr_results = await loop.run_in_executor(
-                None, scan_image_gemini, image_url, gemini_keys
-            )
-            
-            if ocr_results:
-                print(f"✅ [DONE] {server_name}: {ocr_results}", flush=True)
-                await send_yoru_style_embed(message.channel, ocr_results)
-            else:
-                pass 
+        if not img_bytes: return []
 
-        except Exception as e:
-            print(f"❌ [WORKER ERROR] {server_name}: {e}", flush=True)
+        img = Image.open(io.BytesIO(img_bytes))
+        width, height = img.size
         
-        finally:
-            drop_queue.task_done()
-            # Nghỉ 0.5s để tránh spam Google (có thể giảm xuống 0.2 nếu nhiều key)
-            await asyncio.sleep(0.5)
-
-@bot.event
-async def on_ready():
-    global drop_queue
-    print(f"✅ Bot Online: {bot.user.name}")
-    
-    # --- FIX LỖI Ở ĐÂY: TẠO QUEUE TRONG LOOP CỦA BOT ---
-    if drop_queue is None:
-        drop_queue = asyncio.Queue()
-        print("✅ Đã khởi tạo Hàng Chờ (Queue) thành công!", flush=True)
-    
-    # Khởi động 3 nhân viên
-    for _ in range(3):
-        bot.loop.create_task(worker())
-
-@bot.event
-async def on_message(message):
-    if message.author.id != KARUTA_ID:
-        return 
-
-    # Check drop
-    is_dropping = False
-    if message.content and "dropping" in message.content.lower():
-        is_dropping = True
-    elif message.embeds:
-        desc = message.embeds[0].description or ""
-        if "dropping" in desc.lower():
-            is_dropping = True
-
-    if not is_dropping:
-        return
-
-    # Lấy ảnh
-    image_url = None
-    if message.embeds:
-        if message.embeds[0].image:
-            image_url = message.embeds[0].image.url
-        elif message.embeds[0].thumbnail:
-            image_url = message.embeds[0].thumbnail.url
-    elif message.attachments:
-        image_url = message.attachments[0].url
-
-    if image_url:
-        server_name = message.guild.name if message.guild else "DM"
+        # Cắt dải ngang dưới đáy (15%)
+        print_crop_top = int(height * 0.85) 
+        crop_img = img.crop((0, print_crop_top, width, height))
         
-        # Đẩy vào hàng chờ (nếu queue đã sẵn sàng)
-        if drop_queue is not None:
-            print(f"📥 [QUEUE] Đã nhận drop từ {server_name}. Đang xếp hàng...", flush=True)
-            await drop_queue.put((message, image_url, server_name))
-        else:
-            print(f"⚠️ [WARN] Drop từ {server_name} bị bỏ qua vì Bot chưa load xong Queue.", flush=True)
+        if crop_img.mode != 'RGB': crop_img = crop_img.convert('RGB')
+        
+        # Tăng tương phản
+        enhancer = ImageEnhance.Contrast(crop_img)
+        crop_img = enhancer.enhance(1.5)
+        
+        # Resize nhỏ lại chút nữa để request nhẹ hơn
+        if crop_img.width > 800:
+            ratio = 800 / float(crop_img.width)
+            new_height = int((float(crop_img.height) * float(ratio)))
+            crop_img = crop_img.resize((800, new_height), Image.Resampling.LANCZOS)
 
-    await bot.process_commands(message)
+        buffered = io.BytesIO()
+        crop_img.save(buffered, format="JPEG", quality=80)
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-async def send_yoru_style_embed(channel, results):
-    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-    description_lines = []
-    
-    for idx, print_num, edition_num in results:
-        if idx < len(number_emojis):
-            line = f"{number_emojis[idx]} | **#{print_num} · ◈{edition_num}**"
-            description_lines.append(line)
-    
-    if description_lines:
-        try:
-            embed = discord.Embed(description="\n".join(description_lines), color=0x36393f)
-            embed.set_footer(text="Shadow OCR")
-            await channel.send(embed=embed)
-        except: pass
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": "Read Print and Edition. Output: 'P-E'. Example: '12-1, 567-2'."},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }]
+        }
+        
+        results = []
+        random.shuffle(valid_keys)
 
-@bot.event
-async def on_close():
-    pass
+        for api_key in valid_keys:
+            # --- ĐỔI SANG MODEL 1.5 FLASH 8B (ỔN ĐỊNH HƠN) ---
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key={api_key}"
+            
+            try:
+                # Thêm timeout ngắn để nếu lag thì bỏ qua ngay
+                ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
+                
+                if ocr_resp.status_code == 200:
+                    data = ocr_resp.json()
+                    if 'candidates' in data:
+                        text = data['candidates'][0]['content']['parts'][0]['text']
+                        matches = re.findall(r'(\d+)[\s\-\.]+(\d+)', text)
+                        if matches:
+                            for i, (p_str, e_str) in enumerate(matches):
+                                if i > 3: break
+                                results.append((i, int(p_str), int(e_str)))
+                            return results
+                        else:
+                            # Nếu API trả về 200 nhưng không đọc được số, coi như xong luôn để tránh thử lại tốn key
+                            return []
+                
+                elif ocr_resp.status_code == 429:
+                    print(f"[GEMINI] ⏳ Key ...{api_key[-4:]} hết lượt. Đổi...", flush=True)
+                    continue
+                elif ocr_resp.status_code == 400:
+                    print(f"[GEMINI] ❌ Key ...{api_key[-4:]} lỗi 400 (Check lại key).", flush=True)
+                    continue
 
-def run_discord_bot():
-    token = os.getenv("DISCORD_TOKEN")
-    if token: bot.run(token)
-    else: print("❌ Thiếu DISCORD_TOKEN")
+            except Exception:
+                continue
+        
+        return results
+
+    except Exception:
+        return []
