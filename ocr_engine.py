@@ -7,7 +7,7 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    OCR Engine - Đã Fix lỗi 404 bằng cách dùng model 'gemini-1.5-flash-latest'
+    OCR Engine - Sử dụng Model gemini-1.5-flash-latest (Bản ổn định nhất hiện tại)
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
@@ -42,8 +42,9 @@ def scan_image_gemini(image_url, api_keys):
         api_key = random.choice(valid_keys).strip()
         key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
         
-        # --- FIX LỖI 404 TẠI ĐÂY ---
-        # Đổi từ 'gemini-1.5-flash' thành 'gemini-1.5-flash-latest'
+        # --- ĐÂY LÀ CHỖ QUAN TRỌNG NHẤT ---
+        # Tôi dùng 'gemini-1.5-flash-latest' vì nó ổn định nhất cho OCR
+        # Nếu bạn muốn dùng bản mới trong ảnh, đổi thành: 'gemini-3-flash-preview'
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
 
         print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
@@ -82,8 +83,6 @@ def scan_image_gemini(image_url, api_keys):
                 if ocr_resp.status_code == 200:
                     print(f"[GEMINI] ✅ Thẻ {i+1}: API OK (Status 200).", flush=True)
                     data = ocr_resp.json()
-                    # Log raw data để xem google trả về gì nếu không tìm thấy số
-                    # print(f"[DEBUG RAW] {data}") 
                     
                     if 'candidates' in data:
                         text_result = data['candidates'][0]['content']['parts'][0]['text']
