@@ -7,7 +7,7 @@ from PIL import Image
 
 def scan_image_gemini(image_url, api_keys):
     """
-    OCR Engine với Log chi tiết trạng thái API để debug Key.
+    OCR Engine - Đã Fix lỗi 404 bằng cách đổi Model Name.
     """
     valid_keys = [k for k in api_keys if k.strip()]
     if not valid_keys:
@@ -40,10 +40,11 @@ def scan_image_gemini(image_url, api_keys):
         
         # Chọn Key ngẫu nhiên
         api_key = random.choice(valid_keys).strip()
-        # Lấy 4 ký tự cuối của key để log (giúp bạn biết key nào đang chạy mà ko lộ hết key)
         key_suffix = api_key[-4:] if len(api_key) > 4 else "xxxx"
         
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        # --- SỬA LỖI Ở ĐÂY: Đổi sang 'gemini-1.5-flash-latest' ---
+        # Nếu vẫn lỗi, bạn có thể thử đổi thành 'gemini-2.0-flash-exp'
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
 
         print(f"[GEMINI] 🚀 Bắt đầu quét {num_cards} thẻ trong ảnh...", flush=True)
 
@@ -51,7 +52,7 @@ def scan_image_gemini(image_url, api_keys):
             left = i * card_width
             right = (i + 1) * card_width
             
-            # Cắt 15% dưới (Tỷ lệ 0.86 như code cũ của bạn)
+            # Cắt 15% dưới (Tỷ lệ 0.86)
             print_crop_top = int(height * 0.86) 
             crop_img = img.crop((left, print_crop_top, right, height))
             
@@ -73,16 +74,13 @@ def scan_image_gemini(image_url, api_keys):
                 }]
             }
             
-            # --- LOG QUAN TRỌNG: BÁO CÁO GỬI API ---
             print(f"[GEMINI] 📤 Thẻ {i+1}: Đang gửi tới Google (Key: ...{key_suffix})...", flush=True)
             
             try:
                 ocr_resp = requests.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
                 
-                # --- LOG QUAN TRỌNG: TRẠNG THÁI PHẢN HỒI ---
                 if ocr_resp.status_code == 200:
                     print(f"[GEMINI] ✅ Thẻ {i+1}: API OK (Status 200).", flush=True)
-                    # Xử lý kết quả...
                     data = ocr_resp.json()
                     if 'candidates' in data:
                         text_result = data['candidates'][0]['content']['parts'][0]['text']
@@ -100,7 +98,6 @@ def scan_image_gemini(image_url, api_keys):
                         else:
                             print(f"[GEMINI] ⚠️ Thẻ {i+1}: API trả về text nhưng không tìm thấy số: '{text_result.strip()}'", flush=True)
                 else:
-                    # NẾU LỖI KEY SẼ HIỆN Ở ĐÂY
                     print(f"[GEMINI] ❌ Thẻ {i+1}: LỖI API! Status: {ocr_resp.status_code}", flush=True)
                     print(f"[GEMINI] 📜 Chi tiết lỗi: {ocr_resp.text}", flush=True)
             
