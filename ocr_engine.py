@@ -6,15 +6,14 @@ import random
 import time
 from PIL import Image, ImageEnhance
 
-# Biến toàn cục để nhớ những key nào đang bị "phạt" (429)
-# Để lần sau né nó ra, đỡ tốn thời gian thử
+# Danh sách đen tạm thời để né các key bị quá tải (429)
 BAD_KEYS = {} 
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Gemini 3 Flash Preview
-    - Hỗ trợ list key cực dài (50-100 key).
-    - Tự động né các key đang bị 429 trong vòng 1 phút.
+    OCR Engine: Gemini 2.5 Flash (Theo snippet bạn cung cấp).
+    - Model ID: gemini-2.5-flash
+    - Chiến thuật: Xếp Tầng + Cắt 12.5% + Smart Rotation Key.
     """
     global BAD_KEYS
     
@@ -28,7 +27,7 @@ def scan_image_gemini(image_url, api_keys_list):
         print("[OCR] ❌ Lỗi: Không có API Key!", flush=True)
         return []
 
-    # 2. Cơ chế lọc Key thông minh (Smart Rotation)
+    # 2. Cơ chế lọc Key thông minh
     current_time = time.time()
     # Xóa các key đã hết hạn phạt (sau 60s)
     BAD_KEYS = {k: t for k, t in BAD_KEYS.items() if current_time - t < 60}
@@ -36,13 +35,12 @@ def scan_image_gemini(image_url, api_keys_list):
     # Chỉ lấy những key KHÔNG nằm trong danh sách phạt
     good_keys = [k for k in all_keys if k not in BAD_KEYS]
     
-    # Nếu tất cả key đều bị phạt -> Buộc phải dùng lại tất cả (Reset)
+    # Nếu tất cả key đều bị phạt -> Reset để thử lại vận may
     if not good_keys:
         good_keys = all_keys
         BAD_KEYS.clear()
-        print("[OCR] ⚠️ Tất cả key đều đang quá tải! Đang thử lại vận may...", flush=True)
+        print("[OCR] ⚠️ Tất cả key đều bận! Đang thử lại...", flush=True)
 
-    # Xáo trộn ngẫu nhiên để chia tải
     random.shuffle(good_keys)
 
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -64,7 +62,7 @@ def scan_image_gemini(image_url, api_keys_list):
         original_img = Image.open(io.BytesIO(img_bytes))
         width, height = original_img.size
         
-        # XỬ LÝ ẢNH (Cắt 12.5% + Xếp tầng)
+        # XỬ LÝ ẢNH (Cắt 12.5% + Xếp tầng) - GIỮ NGUYÊN VÌ ĐÃ CHUẨN
         num_cards = 3
         if width > 1000: num_cards = 4
         card_width = width // num_cards
@@ -103,11 +101,11 @@ def scan_image_gemini(image_url, api_keys_list):
         for api_key in good_keys:
             key_short = api_key[-4:]
             
-            # Model Gemini 3 Flash Preview
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
+            # --- CẬP NHẬT MODEL MỚI: gemini-2.5-flash ---
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
             
             try:
-                print(f"   => [GEMINI 3] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
+                print(f"   => [GEMINI 2.5] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
                 if ocr_resp.status_code == 200:
@@ -125,20 +123,23 @@ def scan_image_gemini(image_url, api_keys_list):
                                     if p > 0: clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                print(f"   => [GEMINI 3] ✅ OK: {clean_results}", flush=True)
+                                print(f"   => [GEMINI 2.5] ✅ OK: {clean_results}", flush=True)
                                 return clean_results
+                        else:
+                             # 2.5 có thể trả về text nhưng không đúng định dạng, log ra xem
+                            print(f"   => [GEMINI 2.5] ⚠️ Text: {text.strip()}", flush=True)
 
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI 3] ⏳ Key ...{key_short} quá tải -> Tạm khóa 60s.", flush=True)
-                    # Đưa key vào danh sách đen trong 60s
+                    print(f"   => [GEMINI 2.5] ⏳ Key ...{key_short} quá tải -> Tạm né.", flush=True)
                     BAD_KEYS[api_key] = time.time()
                     continue
                 else:
-                    print(f"   => [GEMINI 3] 💀 Lỗi {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
+                    # In mã lỗi để xem có bị 404 nữa không
+                    print(f"   => [GEMINI 2.5] 💀 Lỗi {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
                     continue
 
             except Exception as e:
-                print(f"   => [GEMINI 3] ❌ Lỗi mạng: {e}", flush=True)
+                print(f"   => [GEMINI 2.5] ❌ Lỗi mạng: {e}", flush=True)
                 continue
         
         return []
