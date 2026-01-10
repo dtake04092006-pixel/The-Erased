@@ -8,7 +8,9 @@ from PIL import Image, ImageEnhance
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Chiến thuật Cắt Đáy 12.5% + Xếp Tầng (Vertical Stack)
+    OCR Engine: Debug Mode
+    - In ra TOÀN BỘ lỗi từ Google để biết tại sao nó im lặng.
+    - Giảm Quality xuống 90 để nhẹ file.
     """
     if isinstance(api_keys_list, str):
         valid_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
@@ -23,7 +25,7 @@ def scan_image_gemini(image_url, api_keys_list):
     session = requests.Session()
 
     try:
-        # 1. Tải ảnh
+        # 1. TẢI ẢNH
         img_bytes = None
         for _ in range(2):
             try:
@@ -38,16 +40,14 @@ def scan_image_gemini(image_url, api_keys_list):
         original_img = Image.open(io.BytesIO(img_bytes))
         width, height = original_img.size
         
-        # 2. Xử lý ảnh
+        # 2. CẮT & XẾP TẦNG (12.5% Đáy)
         num_cards = 3
         if width > 1000: num_cards = 4
         card_width = width // num_cards
         
-        # Tỷ lệ cắt 12.5% (Chuẩn từ ảnh debug của bạn)
         crop_height = int(height * 0.125) 
         crop_top = height - crop_height
         
-        # Tạo ảnh xếp chồng (Padding hồng/đen để phân cách)
         stack_img = Image.new('RGB', (card_width, (crop_height + 20) * num_cards), (255, 0, 255))
         
         crops_data = [] 
@@ -55,7 +55,6 @@ def scan_image_gemini(image_url, api_keys_list):
         for i in range(num_cards):
             left = i * card_width
             right = (i + 1) * card_width
-            
             crop = original_img.crop((left, crop_top, right, height))
             
             if crop.mode != 'RGB': crop = crop.convert('RGB')
@@ -67,15 +66,15 @@ def scan_image_gemini(image_url, api_keys_list):
             crops_data.append(i)
 
         buffered = io.BytesIO()
-        stack_img.save(buffered, format="JPEG", quality=100)
+        # Giảm xuống 90 để tối ưu tốc độ và dung lượng
+        stack_img.save(buffered, format="JPEG", quality=90)
         img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        # 3. Gửi Gemini (Prompt Cực Mạnh)
+        # 3. GỬI GEMINI
         payload = {
             "contents": [{
                 "parts": [
-                    # Prompt đã được tối ưu dựa trên ảnh debug
-                    {"text": "Analyze this image containing card numbers stacked vertically. Read from TOP to BOTTOM. Extract the Print Number (left) and Edition Number (right, after the dot '·'). Output format: 'P-E'. Example: '79566-1, 39809-1, 20765-3'."},
+                    {"text": "Read these vertically stacked numbers. For each row, extract Print Number and Edition. Format: 'P-E'. Example: '79371-1, 79552-1'."},
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
                 ]
             }]
@@ -89,15 +88,13 @@ def scan_image_gemini(image_url, api_keys_list):
             api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
             
             try:
-                print(f"   => [GEMINI] 🚀 Đang gửi ảnh Xếp Tầng (Key ...{key_short})...", flush=True)
+                print(f"   => [GEMINI] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
                 if ocr_resp.status_code == 200:
                     data = ocr_resp.json()
                     if 'candidates' in data:
                         text = data['candidates'][0]['content']['parts'][0]['text']
-                        
-                        # Regex bắt số (Chấp nhận dấu chấm Karuta ·)
                         matches = re.findall(r'(\d+)[\s\-\.·•|]+(\d+)', text)
                         
                         if matches:
@@ -110,20 +107,27 @@ def scan_image_gemini(image_url, api_keys_list):
                                         clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                print(f"   => [GEMINI] ✅ Đã đọc được: {clean_results}", flush=True)
+                                print(f"   => [GEMINI] ✅ OK: {clean_results}", flush=True)
                                 return clean_results
                         else:
-                            print(f"   => [GEMINI] ⚠️ API OK nhưng không thấy số. Text: {text.strip()}", flush=True)
+                            print(f"   => [GEMINI] ⚠️ Không thấy số. Text: {text.strip()}", flush=True)
 
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI] ⏳ Key ...{key_short} quá tải. Đổi...", flush=True)
+                    print(f"   => [GEMINI] ⏳ Key ...{key_short} quá tải (429).", flush=True)
+                    continue
+                
+                # --- PHẦN QUAN TRỌNG MỚI THÊM ---
+                else:
+                    # In ra lỗi nếu không phải 200 cũng không phải 429
+                    print(f"   => [GEMINI] 💀 LỖI LẠ {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
                     continue
 
             except Exception as e:
-                print(f"   => [GEMINI] ❌ Lỗi: {e}", flush=True)
+                print(f"   => [GEMINI] ❌ Lỗi mạng: {e}", flush=True)
                 continue
         
         return results
 
-    except Exception:
+    except Exception as e:
+        print(f"[OCR ERROR] {e}")
         return []
