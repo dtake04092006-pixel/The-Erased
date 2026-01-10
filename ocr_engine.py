@@ -6,42 +6,46 @@ import random
 import time
 from PIL import Image, ImageEnhance
 
-# Danh sách đen tạm thời để né các key bị quá tải (429)
-BAD_KEYS = {} 
+# Danh sách đen tạm thời (429 - Quá tải)
+TEMP_BANNED_KEYS = {} 
+# Danh sách đen vĩnh viễn (400 - Key chết/Hết hạn)
+DEAD_KEYS = set()
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Gemini 2.5 Flash (Theo snippet bạn cung cấp).
-    - Model ID: gemini-2.5-flash
-    - Chiến thuật: Xếp Tầng + Cắt 12.5% + Smart Rotation Key.
+    OCR Engine: Tự động loại bỏ Key chết (Expired) và Key quá tải (429).
+    Model: gemini-1.5-flash (Bản chuẩn, ổn định nhất).
     """
-    global BAD_KEYS
+    global TEMP_BANNED_KEYS, DEAD_KEYS
     
-    # 1. Lọc và làm sạch danh sách Key
+    # 1. Lọc và làm sạch danh sách Key đầu vào
     if isinstance(api_keys_list, str):
         all_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
     else:
         all_keys = [k for k in api_keys_list if k.strip()]
 
-    if not all_keys:
-        print("[OCR] ❌ Lỗi: Không có API Key!", flush=True)
+    # Loại bỏ ngay các key đã xác định là CHẾT
+    valid_keys = [k for k in all_keys if k not in DEAD_KEYS]
+
+    if not valid_keys:
+        print("[OCR] ❌ Lỗi: Tất cả Key đều đã chết hoặc không tồn tại!", flush=True)
         return []
 
-    # 2. Cơ chế lọc Key thông minh
+    # 2. Cơ chế phục hồi Key bị quá tải (Cool-down)
     current_time = time.time()
-    # Xóa các key đã hết hạn phạt (sau 60s)
-    BAD_KEYS = {k: t for k, t in BAD_KEYS.items() if current_time - t < 60}
+    # Mở khóa các key bị phạt 429 sau 60 giây
+    TEMP_BANNED_KEYS = {k: t for k, t in TEMP_BANNED_KEYS.items() if current_time - t < 60}
     
-    # Chỉ lấy những key KHÔNG nằm trong danh sách phạt
-    good_keys = [k for k in all_keys if k not in BAD_KEYS]
+    # Danh sách key sẵn sàng chiến đấu
+    ready_keys = [k for k in valid_keys if k not in TEMP_BANNED_KEYS]
     
-    # Nếu tất cả key đều bị phạt -> Reset để thử lại vận may
-    if not good_keys:
-        good_keys = all_keys
-        BAD_KEYS.clear()
-        print("[OCR] ⚠️ Tất cả key đều bận! Đang thử lại...", flush=True)
+    # Nếu tất cả đều bận, buộc phải thử lại toàn bộ (Reset tạm thời)
+    if not ready_keys:
+        ready_keys = valid_keys
+        TEMP_BANNED_KEYS.clear()
+        print("[OCR] ⚠️ Tất cả key đều bận! Đang thử lại vận may...", flush=True)
 
-    random.shuffle(good_keys)
+    random.shuffle(ready_keys)
 
     headers = {"User-Agent": "Mozilla/5.0"}
     session = requests.Session()
@@ -62,7 +66,7 @@ def scan_image_gemini(image_url, api_keys_list):
         original_img = Image.open(io.BytesIO(img_bytes))
         width, height = original_img.size
         
-        # XỬ LÝ ẢNH (Cắt 12.5% + Xếp tầng) - GIỮ NGUYÊN VÌ ĐÃ CHUẨN
+        # XỬ LÝ ẢNH (GIỮ NGUYÊN)
         num_cards = 3
         if width > 1000: num_cards = 4
         card_width = width // num_cards
@@ -98,14 +102,16 @@ def scan_image_gemini(image_url, api_keys_list):
         }
         
         # THỬ TỪNG KEY
-        for api_key in good_keys:
+        for api_key in ready_keys:
             key_short = api_key[-4:]
             
-            # --- CẬP NHẬT MODEL MỚI: gemini-2.5-flash ---
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            # --- DÙNG BẢN CHUẨN: gemini-1.5-flash ---
+            # Nếu bản này vẫn lỗi 404, hãy thử đổi lại thành gemini-2.5-flash hoặc gemini-3-flash-preview
+            # Nhưng quan trọng nhất là code này sẽ tự lọc key chết.
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
             
             try:
-                print(f"   => [GEMINI 2.5] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
+                # print(f"   => [GEMINI] 🚀 Đang gửi (Key ...{key_short})...", flush=True) # Tắt log này cho đỡ rối
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
                 if ocr_resp.status_code == 200:
@@ -123,23 +129,26 @@ def scan_image_gemini(image_url, api_keys_list):
                                     if p > 0: clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                print(f"   => [GEMINI 2.5] ✅ OK: {clean_results}", flush=True)
+                                print(f"   => [GEMINI] ✅ OK (Key ...{key_short}): {clean_results}", flush=True)
                                 return clean_results
-                        else:
-                             # 2.5 có thể trả về text nhưng không đúng định dạng, log ra xem
-                            print(f"   => [GEMINI 2.5] ⚠️ Text: {text.strip()}", flush=True)
 
+                # XỬ LÝ LỖI
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI 2.5] ⏳ Key ...{key_short} quá tải -> Tạm né.", flush=True)
-                    BAD_KEYS[api_key] = time.time()
+                    print(f"   => [GEMINI] ⏳ Quá tải (...{key_short}) -> Né 60s.", flush=True)
+                    TEMP_BANNED_KEYS[api_key] = time.time()
                     continue
+                
+                elif ocr_resp.status_code == 400:
+                    print(f"   => [GEMINI] 💀 KEY CHẾT (...{key_short}) -> XÓA VĨNH VIỄN KHỎI LIST.", flush=True)
+                    DEAD_KEYS.add(api_key) # Thêm vào danh sách tử thần
+                    continue
+
                 else:
-                    # In mã lỗi để xem có bị 404 nữa không
-                    print(f"   => [GEMINI 2.5] 💀 Lỗi {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
+                    print(f"   => [GEMINI] ⚠️ Lỗi {ocr_resp.status_code} (...{key_short})", flush=True)
                     continue
 
             except Exception as e:
-                print(f"   => [GEMINI 2.5] ❌ Lỗi mạng: {e}", flush=True)
+                print(f"   => [GEMINI] ❌ Lỗi mạng: {e}", flush=True)
                 continue
         
         return []
