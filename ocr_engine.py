@@ -8,9 +8,9 @@ from PIL import Image, ImageEnhance
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: 
-    - Model: gemini-3-flash-preview (Theo ảnh Google AI Studio 2026).
-    - Chiến thuật: Xếp Tầng + Cắt 12.5% (Đã kiểm tra qua !view_crop là chuẩn).
+    OCR Engine: Dùng 'gemini-1.5-flash-002' (Mã cứng, không dùng alias).
+    - Đây là bản Update tháng 9/2025, ổn định nhất của Google.
+    - Chiến thuật: Cắt 12.5% + Xếp Tầng.
     """
     if isinstance(api_keys_list, str):
         valid_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
@@ -40,16 +40,14 @@ def scan_image_gemini(image_url, api_keys_list):
         original_img = Image.open(io.BytesIO(img_bytes))
         width, height = original_img.size
         
-        # 2. XỬ LÝ ẢNH (GIỮ NGUYÊN VÌ ẢNH DEBUG ĐÃ ĐẸP)
+        # 2. XỬ LÝ ẢNH
         num_cards = 3
         if width > 1000: num_cards = 4
         card_width = width // num_cards
         
-        # Cắt 12.5% đáy (Chuẩn)
         crop_height = int(height * 0.125) 
         crop_top = height - crop_height
         
-        # Tạo ảnh xếp tầng
         stack_img = Image.new('RGB', (card_width, (crop_height + 20) * num_cards), (255, 0, 255))
         
         crops_data = [] 
@@ -57,7 +55,6 @@ def scan_image_gemini(image_url, api_keys_list):
         for i in range(num_cards):
             left = i * card_width
             right = (i + 1) * card_width
-            
             crop = original_img.crop((left, crop_top, right, height))
             
             if crop.mode != 'RGB': crop = crop.convert('RGB')
@@ -72,11 +69,11 @@ def scan_image_gemini(image_url, api_keys_list):
         stack_img.save(buffered, format="JPEG", quality=90)
         img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        # 3. GỬI GEMINI 3
+        # 3. GỬI GEMINI (Dùng ID 002)
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Read these vertically stacked numbers. For each row, extract Print Number and Edition. Format: 'P-E'. Example: '79371-1, 79552-1'."},
+                    {"text": "Read these vertically stacked numbers (Print and Edition). Format: 'P-E'. Example: '79371-1, 79552-1'."},
                     {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
                 ]
             }]
@@ -88,20 +85,17 @@ def scan_image_gemini(image_url, api_keys_list):
         for api_key in valid_keys:
             key_short = api_key[-4:]
             
-            # --- CẬP NHẬT ĐÚNG MODEL: gemini-3-flash-preview ---
-            # Lưu ý: Nếu v1beta báo lỗi 404, Google có thể đã đẩy bản 3 lên v1alpha.
-            # Nhưng thường Preview sẽ nằm ở v1beta.
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
+            # --- ĐỔI THÀNH MÃ CỨNG: gemini-1.5-flash-002 ---
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-002:generateContent?key={api_key}"
             
             try:
-                print(f"   => [GEMINI 3] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
+                print(f"   => [GEMINI 002] 🚀 Đang gửi (Key ...{key_short})...", flush=True)
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
                 if ocr_resp.status_code == 200:
                     data = ocr_resp.json()
                     if 'candidates' in data:
                         text = data['candidates'][0]['content']['parts'][0]['text']
-                        
                         matches = re.findall(r'(\d+)[\s\-\.·•|]+(\d+)', text)
                         
                         if matches:
@@ -114,21 +108,21 @@ def scan_image_gemini(image_url, api_keys_list):
                                         clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                print(f"   => [GEMINI 3] ✅ OK: {clean_results}", flush=True)
+                                print(f"   => [GEMINI 002] ✅ OK: {clean_results}", flush=True)
                                 return clean_results
                         else:
-                            print(f"   => [GEMINI 3] ⚠️ Không thấy số. Text: {text.strip()}", flush=True)
+                            print(f"   => [GEMINI 002] ⚠️ Không thấy số. Text: {text.strip()}", flush=True)
 
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI 3] ⏳ Key ...{key_short} quá tải (429).", flush=True)
+                    print(f"   => [GEMINI 002] ⏳ Key ...{key_short} quá tải.", flush=True)
                     continue
                 else:
-                    # In lỗi chi tiết để debug nếu tên model vẫn chưa chuẩn với API Endpoint
-                    print(f"   => [GEMINI 3] 💀 LỖI {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
+                    # Nếu vẫn lỗi 404 thì do tài khoản của bạn bị Google phạt hoặc chặn model này
+                    print(f"   => [GEMINI 002] 💀 LỖI {ocr_resp.status_code}: {ocr_resp.text}", flush=True)
                     continue
 
             except Exception as e:
-                print(f"   => [GEMINI 3] ❌ Lỗi mạng: {e}", flush=True)
+                print(f"   => [GEMINI 002] ❌ Lỗi mạng: {e}", flush=True)
                 continue
         
         return results
