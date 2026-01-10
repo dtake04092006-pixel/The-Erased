@@ -6,44 +6,43 @@ import random
 import time
 from PIL import Image, ImageEnhance
 
-# Danh sách đen tạm thời (429 - Quá tải)
+# Danh sách đen tạm thời (429 - Quá tải) -> Chờ 60s thả ra
 TEMP_BANNED_KEYS = {} 
-# Danh sách đen vĩnh viễn (400 - Key chết/Hết hạn)
+# Danh sách đen vĩnh viễn (Key chết/Hết hạn/Sai model) -> Xóa luôn
 DEAD_KEYS = set()
 
 def scan_image_gemini(image_url, api_keys_list):
     """
-    OCR Engine: Tự động loại bỏ Key chết (Expired) và Key quá tải (429).
-    Model: gemini-1.5-flash (Bản chuẩn, ổn định nhất).
+    OCR Engine: Gemini 3 Flash Preview (Theo yêu cầu).
+    - Tự động xóa Key chết (400) và Key lỗi (404).
     """
     global TEMP_BANNED_KEYS, DEAD_KEYS
     
-    # 1. Lọc và làm sạch danh sách Key đầu vào
+    # 1. Lọc và làm sạch danh sách Key
     if isinstance(api_keys_list, str):
         all_keys = [k.strip() for k in api_keys_list.split(',') if k.strip()]
     else:
         all_keys = [k for k in api_keys_list if k.strip()]
 
-    # Loại bỏ ngay các key đã xác định là CHẾT
+    # Chỉ lấy key chưa chết
     valid_keys = [k for k in all_keys if k not in DEAD_KEYS]
 
     if not valid_keys:
-        print("[OCR] ❌ Lỗi: Tất cả Key đều đã chết hoặc không tồn tại!", flush=True)
+        print("[OCR] ❌ Lỗi: Tất cả Key đều đã chết!", flush=True)
         return []
 
-    # 2. Cơ chế phục hồi Key bị quá tải (Cool-down)
+    # 2. Cơ chế Cool-down (60s) cho Key quá tải
     current_time = time.time()
-    # Mở khóa các key bị phạt 429 sau 60 giây
     TEMP_BANNED_KEYS = {k: t for k, t in TEMP_BANNED_KEYS.items() if current_time - t < 60}
     
-    # Danh sách key sẵn sàng chiến đấu
+    # Key sẵn sàng (Chưa chết và không bị quá tải)
     ready_keys = [k for k in valid_keys if k not in TEMP_BANNED_KEYS]
     
-    # Nếu tất cả đều bận, buộc phải thử lại toàn bộ (Reset tạm thời)
-    if not ready_keys:
+    # Nếu tất cả key sống đều đang bận (429) -> Reset tạm danh sách bận để thử lại vận may
+    if not ready_keys and valid_keys:
         ready_keys = valid_keys
         TEMP_BANNED_KEYS.clear()
-        print("[OCR] ⚠️ Tất cả key đều bận! Đang thử lại vận may...", flush=True)
+        # print("[OCR] ⚠️ Tất cả key đều bận! Thử lại...", flush=True)
 
     random.shuffle(ready_keys)
 
@@ -66,7 +65,7 @@ def scan_image_gemini(image_url, api_keys_list):
         original_img = Image.open(io.BytesIO(img_bytes))
         width, height = original_img.size
         
-        # XỬ LÝ ẢNH (GIỮ NGUYÊN)
+        # XỬ LÝ ẢNH (Cắt 12.5% + Xếp tầng)
         num_cards = 3
         if width > 1000: num_cards = 4
         card_width = width // num_cards
@@ -105,13 +104,10 @@ def scan_image_gemini(image_url, api_keys_list):
         for api_key in ready_keys:
             key_short = api_key[-4:]
             
-            # --- DÙNG BẢN CHUẨN: gemini-1.5-flash ---
-            # Nếu bản này vẫn lỗi 404, hãy thử đổi lại thành gemini-2.5-flash hoặc gemini-3-flash-preview
-            # Nhưng quan trọng nhất là code này sẽ tự lọc key chết.
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+            # --- MODEL GEMINI 3 FLASH PREVIEW ---
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
             
             try:
-                # print(f"   => [GEMINI] 🚀 Đang gửi (Key ...{key_short})...", flush=True) # Tắt log này cho đỡ rối
                 ocr_resp = session.post(api_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=8)
                 
                 if ocr_resp.status_code == 200:
@@ -129,26 +125,32 @@ def scan_image_gemini(image_url, api_keys_list):
                                     if p > 0: clean_results.append((original_idx, p, e))
                             
                             if clean_results:
-                                print(f"   => [GEMINI] ✅ OK (Key ...{key_short}): {clean_results}", flush=True)
+                                print(f"   => [GEMINI 3] ✅ OK (...{key_short}): {clean_results}", flush=True)
                                 return clean_results
 
-                # XỬ LÝ LỖI
+                # --- XỬ LÝ LỖI ---
                 elif ocr_resp.status_code == 429:
-                    print(f"   => [GEMINI] ⏳ Quá tải (...{key_short}) -> Né 60s.", flush=True)
+                    print(f"   => [GEMINI 3] ⏳ Quá tải (...{key_short}) -> Né 60s.", flush=True)
                     TEMP_BANNED_KEYS[api_key] = time.time()
                     continue
                 
-                elif ocr_resp.status_code == 400:
-                    print(f"   => [GEMINI] 💀 KEY CHẾT (...{key_short}) -> XÓA VĨNH VIỄN KHỎI LIST.", flush=True)
-                    DEAD_KEYS.add(api_key) # Thêm vào danh sách tử thần
+                elif ocr_resp.status_code == 400: # Key Expired
+                    print(f"   => [GEMINI 3] 💀 KEY CHẾT (...{key_short}) -> XÓA.", flush=True)
+                    DEAD_KEYS.add(api_key)
+                    continue
+                
+                # Quan trọng: Nếu vẫn bị 404 ở key nào thì xóa luôn key đó cho gọn
+                elif ocr_resp.status_code == 404: 
+                    print(f"   => [GEMINI 3] 💀 Lỗi 404 (...{key_short}) -> XÓA.", flush=True)
+                    DEAD_KEYS.add(api_key)
                     continue
 
                 else:
-                    print(f"   => [GEMINI] ⚠️ Lỗi {ocr_resp.status_code} (...{key_short})", flush=True)
+                    print(f"   => [GEMINI 3] ⚠️ Lỗi {ocr_resp.status_code} (...{key_short})", flush=True)
                     continue
 
             except Exception as e:
-                print(f"   => [GEMINI] ❌ Lỗi mạng: {e}", flush=True)
+                print(f"   => [GEMINI 3] ❌ Lỗi mạng: {e}", flush=True)
                 continue
         
         return []
