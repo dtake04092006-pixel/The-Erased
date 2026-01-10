@@ -1,6 +1,6 @@
 discord.py
-flask
 requests
-python-dotenv
 Pillow
-gunicorn
+flask
+python-dotenv
+waitress
