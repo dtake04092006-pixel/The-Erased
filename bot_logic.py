@@ -98,6 +98,76 @@ async def send_yoru_style_embed(channel, results):
             await channel.send(embed=embed)
         except: pass
 
+# --- LỆNH DEBUG: XEM ẢNH SAU KHI CẮT ---
+from PIL import Image, ImageEnhance
+import io
+import requests
+
+@bot.command(name="view_crop")
+async def view_crop(ctx):
+    """
+    Gửi ảnh kèm lệnh !view_crop để xem bot cắt ghép thế nào.
+    """
+    # 1. Lấy ảnh từ tin nhắn
+    image_url = None
+    if ctx.message.attachments:
+        image_url = ctx.message.attachments[0].url
+    elif ctx.message.embeds and ctx.message.embeds[0].image:
+        image_url = ctx.message.embeds[0].image.url
+    
+    if not image_url:
+        await ctx.send("❌ Hãy gửi ảnh kèm lệnh `!view_crop` hoặc reply vào tin nhắn có ảnh.")
+        return
+
+    await ctx.send("🔍 Đang phẫu thuật ảnh... Đợi xíu...")
+
+    try:
+        # 2. Tải ảnh về
+        resp = requests.get(image_url)
+        img = Image.open(io.BytesIO(resp.content))
+        width, height = img.size
+
+        # 3. Tái hiện quy trình xử lý (Giống hệt ocr_engine.py)
+        num_cards = 3
+        if width > 1000: num_cards = 4
+        card_width = width // num_cards
+        
+        # Tỷ lệ cắt 12.5%
+        crop_height = int(height * 0.125) 
+        crop_top = height - crop_height
+        
+        # Tạo khung ảnh xếp tầng (Padding 10px)
+        stack_img = Image.new('RGB', (card_width, (crop_height + 10) * num_cards), (255, 0, 255)) # Nền tím để dễ nhìn phần ghép
+        
+        for i in range(num_cards):
+            left = i * card_width
+            right = (i + 1) * card_width
+            
+            # Cắt
+            crop = img.crop((left, crop_top, right, height))
+            
+            # Convert & Tăng nét
+            if crop.mode != 'RGB': crop = crop.convert('RGB')
+            enhancer = ImageEnhance.Contrast(crop)
+            crop = enhancer.enhance(2.0) # Contrast 2.0
+            
+            # Dán vào cột
+            y_offset = i * (crop_height + 10)
+            stack_img.paste(crop, (0, y_offset))
+
+        # 4. Gửi ảnh kết quả lại cho bạn
+        with io.BytesIO() as image_binary:
+            stack_img.save(image_binary, 'PNG')
+            image_binary.seek(0)
+            await ctx.send(
+                content=f"✅ **Góc nhìn của Gemini:**\n- Cắt đáy: 12.5% ({crop_height}px)\n- Contrast: 2.0\n- Chiến thuật: Xếp tầng", 
+                file=discord.File(fp=image_binary, filename='debug_view.png')
+            )
+
+    except Exception as e:
+        await ctx.send(f"❌ Lỗi debug: {e}")
+        
+
 def run_discord_bot():
     token = os.getenv("DISCORD_TOKEN")
     if token: bot.run(token)
